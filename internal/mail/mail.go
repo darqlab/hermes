@@ -110,7 +110,7 @@ func loadPrivateKey(path string) (crypto.Signer, error) {
 	return key, nil
 }
 
-func Deliver(from string, to []string, raw []byte, cfg SMTPDeliverConfig) error {
+func Deliver(from string, to []string, raw []byte, cfg SMTPDeliverConfig) (string, error) {
 	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
 
 	if cfg.UseTLS {
@@ -119,62 +119,66 @@ func Deliver(from string, to []string, raw []byte, cfg SMTPDeliverConfig) error 
 	return deliverStartTLS(addr, cfg.Host, cfg.User, cfg.Pass, cfg.StartTLS, from, to, raw)
 }
 
-func deliverDirectTLS(addr, host, user, pass, from string, to []string, raw []byte) error {
+func deliverDirectTLS(addr, host, user, pass, from string, to []string, raw []byte) (string, error) {
 	tlsCfg := &tls.Config{ServerName: host}
 	conn, err := tls.Dial("tcp", addr, tlsCfg)
 	if err != nil {
-		return fmt.Errorf("tls dial: %w", err)
+		return "", fmt.Errorf("tls dial: %w", err)
 	}
 	defer conn.Close()
 
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
-		return fmt.Errorf("smtp client: %w", err)
+		return "", fmt.Errorf("smtp client: %w", err)
 	}
 	defer client.Quit()
 
 	return sendData(client, host, user, pass, from, to, raw)
 }
 
-func deliverStartTLS(addr, host, user, pass string, useStartTLS bool, from string, to []string, raw []byte) error {
+func deliverStartTLS(addr, host, user, pass string, useStartTLS bool, from string, to []string, raw []byte) (string, error) {
 	client, err := smtp.Dial(addr)
 	if err != nil {
-		return fmt.Errorf("smtp dial: %w", err)
+		return "", fmt.Errorf("smtp dial: %w", err)
 	}
 	defer client.Quit()
 
 	if useStartTLS {
 		tlsCfg := &tls.Config{ServerName: host}
 		if err := client.StartTLS(tlsCfg); err != nil {
-			return fmt.Errorf("starttls: %w", err)
+			return "", fmt.Errorf("starttls: %w", err)
 		}
 	}
 
 	return sendData(client, host, user, pass, from, to, raw)
 }
 
-func sendData(client *smtp.Client, host, user, pass, from string, to []string, raw []byte) error {
+func sendData(client *smtp.Client, host, user, pass, from string, to []string, raw []byte) (string, error) {
 	if pass != "" {
 		auth := smtp.PlainAuth("", user, pass, host)
 		if err := client.Auth(auth); err != nil {
-			return fmt.Errorf("auth: %w", err)
+			return "", fmt.Errorf("auth: %w", err)
 		}
 	}
 
 	if err := client.Mail(from); err != nil {
-		return fmt.Errorf("mail from: %w", err)
+		return "", fmt.Errorf("mail from: %w", err)
 	}
 	for _, rcpt := range to {
 		if err := client.Rcpt(rcpt); err != nil {
-			return fmt.Errorf("rcpt to %s: %w", rcpt, err)
+			return "", fmt.Errorf("rcpt to %s: %w", rcpt, err)
 		}
 	}
 	wc, err := client.Data()
 	if err != nil {
-		return fmt.Errorf("data: %w", err)
+		return "", fmt.Errorf("data: %w", err)
 	}
 	if _, err := wc.Write(raw); err != nil {
-		return fmt.Errorf("write: %w", err)
+		return "", fmt.Errorf("write: %w", err)
 	}
-	return wc.Close()
+	resp := ""
+	if err := wc.Close(); err != nil {
+		return resp, err
+	}
+	return resp, nil
 }

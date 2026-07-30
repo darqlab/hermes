@@ -67,7 +67,7 @@ func (w *Worker) processOne() bool {
 	log.Printf("queue: delivering job %s (attempt %d/%d) to %v",
 		job.ID[:8], job.RetryCount+1, w.store.retryMax, job.EnvelopeTo)
 
-	err = mail.Deliver(job.EnvelopeFrom, job.EnvelopeTo, job.RawMIME, w.mailCfg)
+	resp, err := mail.Deliver(job.EnvelopeFrom, job.EnvelopeTo, job.RawMIME, w.mailCfg)
 	if err != nil {
 		log.Printf("queue: job %s failed: %v", job.ID[:8], err)
 		if markErr := w.store.MarkFailed(job.ID, err.Error()); markErr != nil {
@@ -79,6 +79,6 @@ func (w *Worker) processOne() bool {
 	if err := w.store.MarkDone(job.ID); err != nil {
 		log.Printf("queue: mark done error: %v", err)
 	}
-	log.Printf("queue: job %s delivered successfully", job.ID[:8])
+	log.Printf("queue: job %s delivered — %s", job.ID[:8], resp)
 	return true
 }

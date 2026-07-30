@@ -144,7 +144,8 @@ func sendCmd() *cobra.Command {
 			}
 
 			log.Printf("delivering via %s:%d", cfg.SMTP.Host, cfg.SMTP.Port)
-			if err := mail.Deliver(from, append(append(to, cc...), bcc...), raw, smtpCfg); err != nil {
+			resp, err := mail.Deliver(from, append(append(to, cc...), bcc...), raw, smtpCfg)
+			if err != nil {
 				log.Printf("delivery failed: %v", err)
 
 				if noQueue {
@@ -190,9 +191,10 @@ func sendCmd() *cobra.Command {
 			if useJSON {
 				fmt.Println(jsonString(map[string]any{
 					"status": "ok",
+					"server": resp,
 				}))
 			} else {
-				log.Printf("sent successfully")
+				log.Printf("sent successfully — %s", resp)
 			}
 			return nil
 		},
