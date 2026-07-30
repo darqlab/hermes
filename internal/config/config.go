@@ -72,6 +72,16 @@ func Load(path string) (*Config, error) {
 	}
 
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) && path == "hermes.yaml" {
+		if home := os.Getenv("HOME"); home != "" {
+			homePath := home + "/hermes.yaml"
+			if d, err2 := os.ReadFile(homePath); err2 == nil {
+				path = homePath
+				data = d
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			applyEnvOverrides(cfg)
