@@ -1,6 +1,8 @@
 # Hermes config — copy to hermes.yaml and fill in real values.
 # Each value can also be set via HERMES_ prefix env vars (e.g. HERMES_SMTP_HOST).
 
+from: ""                 # default envelope/header From for "hermes send"; falls back to smtp.user if unset (or set HERMES_FROM)
+
 smtp:
   host: smtp.example.com
   port: 587

@@ -43,11 +43,15 @@ Configuration resolution order (later steps override earlier ones):
      found at all, Hermes falls back to defaults + env vars only.
   3. Environment variable overrides, applied on top of whatever the file (or
      defaults) set:
-       HERMES_SMTP_HOST, HERMES_SMTP_PORT, HERMES_SMTP_USER, HERMES_SMTP_PASS,
-       HERMES_SMTP_USE_TLS (true/1), HERMES_SMTP_STARTTLS (false/0 to disable),
-       HERMES_DKIM_SELECTOR, HERMES_DKIM_DOMAIN, HERMES_DKIM_KEY_FILE,
-       HERMES_QUEUE_QUEUE_FILE, HERMES_QUEUE_RETRY_MAX,
+       HERMES_FROM, HERMES_SMTP_HOST, HERMES_SMTP_PORT, HERMES_SMTP_USER,
+       HERMES_SMTP_PASS, HERMES_SMTP_USE_TLS (true/1), HERMES_SMTP_STARTTLS
+       (false/0 to disable), HERMES_DKIM_SELECTOR, HERMES_DKIM_DOMAIN,
+       HERMES_DKIM_KEY_FILE, HERMES_QUEUE_QUEUE_FILE, HERMES_QUEUE_RETRY_MAX,
        HERMES_QUEUE_BACKOFF_BASE, HERMES_QUEUE_BACKOFF_CAP.
+
+Top-level "from" (config file) / HERMES_FROM (env) sets the default envelope-
+and-header From address used when "hermes send --from" is omitted. If unset,
+it falls back to smtp.user.
 
 smtp.host, smtp.user, and smtp.pass are always required (from file or env)
 except for "hermes send --dry-run", which composes a message and prints it
@@ -123,8 +127,10 @@ message.
 
 Recipients: --to is required (repeatable for multiple recipients). --cc and
 --bcc are optional and repeatable. --from is optional; if omitted it
-defaults to the "smtp.user" value from the resolved config (see "hermes
---help" for config resolution order).
+defaults to the resolved config's top-level "from" (or HERMES_FROM env var),
+falling back to "smtp.user" if neither is set (see "hermes --help" for
+config resolution order). --dry-run does not load config, so with --from
+omitted it prints a "hermes@localhost" placeholder From address instead.
 
 On delivery failure: the composed message is automatically enqueued to the
 local retry queue (see "hermes queue --help") unless --no-queue is set, in
@@ -162,10 +168,6 @@ main.go):
 			if len(to) == 0 {
 				return fmt.Errorf("--to is required")
 			}
-			if from == "" {
-				from = "hermes@localhost"
-			}
-
 			if body == "" && bodyHTML == "" {
 				stat, _ := os.Stdin.Stat()
 				if (stat.Mode() & os.ModeCharDevice) == 0 {
@@ -178,6 +180,26 @@ main.go):
 			}
 			if body == "" && bodyHTML == "" {
 				return fmt.Errorf("body is required (--body, --body-html, or stdin)")
+			}
+
+			var cfg *config.Config
+			if dryRun {
+				if from == "" {
+					from = "hermes@localhost"
+				}
+			} else {
+				var err error
+				cfg, err = loadConfig()
+				if err != nil {
+					return fmt.Errorf("config: %w", err)
+				}
+				if from == "" {
+					if cfg.From != "" {
+						from = cfg.From
+					} else {
+						from = cfg.SMTP.User
+					}
+				}
 			}
 
 			log.Printf("composing message to %v", to)
@@ -199,14 +221,6 @@ main.go):
 			if dryRun {
 				fmt.Print(string(raw))
 				return nil
-			}
-
-			cfg, err := loadConfig()
-			if err != nil {
-				return fmt.Errorf("config: %w", err)
-			}
-			if from == "hermes@localhost" {
-				from = cfg.SMTP.User
 			}
 
 			if cfg.DKIM.KeyFile != "" && !noSign {
@@ -284,7 +298,7 @@ main.go):
 	}
 
 	cmd.Flags().StringSliceVar(&to, "to", nil, "recipient (repeatable)")
-	cmd.Flags().StringVar(&from, "from", "", "envelope-from (default: smtp.user)")
+	cmd.Flags().StringVar(&from, "from", "", "envelope-from (default: config's \"from\"/HERMES_FROM, else smtp.user)")
 	cmd.Flags().StringSliceVar(&cc, "cc", nil, "CC recipient (repeatable)")
 	cmd.Flags().StringSliceVar(&bcc, "bcc", nil, "BCC recipient (repeatable)")
 	cmd.Flags().StringVar(&replyTo, "reply-to", "", "Reply-To address")

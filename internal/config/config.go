@@ -37,6 +37,7 @@ type LogConfig struct {
 }
 
 type Config struct {
+	From  string      `yaml:"from"`
 	SMTP  SMTPConfig  `yaml:"smtp"`
 	DKIM  DKIMConfig  `yaml:"dkim"`
 	Queue QueueConfig `yaml:"queue"`
@@ -106,6 +107,9 @@ func Load(path string) (*Config, error) {
 }
 
 func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("HERMES_FROM"); v != "" {
+		cfg.From = v
+	}
 	if v := os.Getenv("HERMES_SMTP_HOST"); v != "" {
 		cfg.SMTP.Host = v
 	}
