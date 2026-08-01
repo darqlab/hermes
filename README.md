@@ -45,22 +45,35 @@ make build && cp hermes ~/.local/bin/
 hermes --version   # or: hermes -v
 ```
 
-## Quick start
+## Quick start (fresh install)
 
 ```bash
-# 1. Create config
-cp hermes.yaml.example hermes.yaml
-# Edit: fill in smtp.host, smtp.user, smtp.pass
+# 1. Install
+curl -sL https://raw.githubusercontent.com/darqlab/hermes/main/install.sh | sh
+# installs to ~/.local/bin/hermes — make sure that's on PATH
 
-# 2. Send a test
+# 2. Create a config
+#    Two valid locations — pick based on how you'll invoke hermes:
+#      a) ./hermes.yaml       — per-project config, used when you run hermes from that directory
+#      b) ~/hermes.yaml       — machine-wide default, used automatically from ANY directory
+#                                when no ./hermes.yaml exists and no --config flag is given
+cp hermes.yaml.example ~/hermes.yaml
+# Edit: fill in smtp.host, smtp.user, smtp.pass (see "Config" below for every field)
+
+# 3. Verify without sending anything (no SMTP connection made)
+hermes send --to test@example.com --subject "Preview" --body "hi" --no-sign --dry-run
+
+# 4. Send a real test
 hermes send --to yourself@gmail.com --subject "Test" --body "It works"
 
-# 3. With DKIM (optional)
+# 5. With DKIM (optional)
 #    Generate: openssl genrsa -out dkim.key 2048
 #    DNS: publish <selector>._domainkey.<domain> TXT record
+#    Fill dkim.key_file/selector/domain in hermes.yaml, then:
 hermes send --to user@x.com --subject "Signed" --body "DKIM test"
-#    (dkim is configured in hermes.yaml)
 ```
+
+**Config resolution order** (first match wins): `--config <path>` flag → `./hermes.yaml` in the current directory → `~/hermes.yaml` as a fallback if neither of the above exists → `HERMES_*` env vars layer on top of whichever file was loaded (or stand alone with no file at all, as long as every required field is covered).
 
 ## Config
 
