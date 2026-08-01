@@ -42,7 +42,7 @@ func NewStore(dbPath string, retryMax int, backoffBase, backoffCap time.Duration
 		retryMax: retryMax,
 		backoffFn: func(retry int) time.Duration {
 			d := backoffBase
-			for i := 0; i < retry; i++ {
+			for i := 1; i < retry; i++ {
 				d *= 2
 				if d > backoffCap {
 					return backoffCap

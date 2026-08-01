@@ -169,15 +169,31 @@ func sendData(client *smtp.Client, host, user, pass, from string, to []string, r
 			return "", fmt.Errorf("rcpt to %s: %w", rcpt, err)
 		}
 	}
-	wc, err := client.Data()
+	// client.Data() (net/smtp) discards the server's final response text on
+	// Close(), returning only an error. To surface the actual response, the
+	// DATA sequence is replicated manually via the exported client.Text
+	// (textproto.Conn), mirroring net/smtp's own internal implementation.
+	id, err := client.Text.Cmd("DATA")
 	if err != nil {
 		return "", fmt.Errorf("data: %w", err)
 	}
-	if _, err := wc.Write(raw); err != nil {
+	client.Text.StartResponse(id)
+	_, _, err = client.Text.ReadResponse(354)
+	client.Text.EndResponse(id)
+	if err != nil {
+		return "", fmt.Errorf("data: %w", err)
+	}
+
+	dw := client.Text.DotWriter()
+	if _, err := dw.Write(raw); err != nil {
 		return "", fmt.Errorf("write: %w", err)
 	}
-	resp := ""
-	if err := wc.Close(); err != nil {
+	if err := dw.Close(); err != nil {
+		return "", fmt.Errorf("write: %w", err)
+	}
+
+	_, resp, err := client.Text.ReadResponse(250)
+	if err != nil {
 		return resp, err
 	}
 	return resp, nil

@@ -408,12 +408,12 @@ func TestDeliver_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deliver() error = %v", err)
 	}
-	// NOTE: sendData's `resp` variable (internal/mail/mail.go) is declared as
-	// resp := "" and returned unmodified after wc.Close() — it never captures
-	// the server's actual 250 response text. This assertion documents the
-	// current (likely unintended) behavior rather than a real response body.
-	if resp != "" {
-		t.Errorf("Deliver() resp = %q, want empty string per current sendData implementation (see NOTE)", resp)
+	// sendData (internal/mail/mail.go) captures the server's actual final
+	// response text via client.Text.ReadResponse(250) rather than discarding
+	// it, so this should match the fake server's DATA-success line verbatim.
+	const want = "OK: message accepted"
+	if resp != want {
+		t.Errorf("Deliver() resp = %q, want %q", resp, want)
 	}
 }
 

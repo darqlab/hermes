@@ -204,10 +204,10 @@ func TestMarkFailed_RetryProgressionAndBackoff(t *testing.T) {
 	}
 
 	// backoffFn (internal/queue/store.go) computes d := backoffBase, then
-	// doubles it `retry` times — i.e. backoffBase * 2^RetryCount, not
-	// backoffBase * 2^(RetryCount-1). So after the Nth failure (RetryCount==N)
-	// the delta is backoffBase*2^N, capped at backoffCap (10s here).
-	wantDeltas := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 10 * time.Second}
+	// doubles it (retry-1) times — i.e. backoffBase * 2^(RetryCount-1). So
+	// after the Nth failure (RetryCount==N) the delta is backoffBase*2^(N-1),
+	// capped at backoffCap (10s here): 1s, 2s, 4s, 8s, then capped at 10s.
+	wantDeltas := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
 	const tolerance = 300 * time.Millisecond
 
 	for i, wantDelta := range wantDeltas {
@@ -255,7 +255,7 @@ func TestMarkFailed_BackoffCappedAndDeadAtRetryMax(t *testing.T) {
 		t.Fatalf("Enqueue() error = %v", err)
 	}
 
-	// 1st failure: retryCount=1, delta ~2s (base*2^1), below cap.
+	// 1st failure: retryCount=1, delta ~1s (base*2^0), below cap.
 	if err := s.MarkFailed(job.ID, "e1"); err != nil {
 		t.Fatalf("MarkFailed() error = %v", err)
 	}
