@@ -578,12 +578,14 @@ func validateIMAPConfig(cfg *config.Config) error {
 
 func readCmd() *cobra.Command {
 	var (
-		mailbox    string
-		limit      uint
-		from       string
-		subject    string
-		unseenOnly bool
-		useJSON    bool
+		mailbox     string
+		limit       uint
+		from        string
+		subject     string
+		unseenOnly  bool
+		useJSON     bool
+		headersOnly bool
+		msgUID      uint
 	)
 
 	cmd := &cobra.Command{
@@ -595,6 +597,10 @@ from INBOX.
 
 Filters (--from, --subject) are substring matches. When multiple filters
 are set they are combined with AND — all must match.
+
+--uid fetches exactly one message by IMAP UID (incompatible with --limit,
+--from, --subject, --unseen-only). --headers-only drops body_text and
+body_html from JSON output (text mode is already body-free).
 
 Exit codes: 0 on success (including zero matching messages), 1 on
 connect/auth/mailbox error or when --json is set and the request fails.
@@ -616,11 +622,12 @@ Output with --json is a JSON array of message objects:
       ]
     }
   ]
-Output without --json is one line per message: date | from | subject.`,
+Output without --json is one line per message: date\tfrom\tsubject.`,
 		Example: `  hermes read
   hermes read --mailbox INBOX --limit 5 --unseen-only
   hermes read --from "alert@example.com" --subject "disk full"
-  hermes read --json --limit 20`,
+  hermes read --json --limit 20 --headers-only
+  hermes read --uid 42 --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
@@ -644,42 +651,49 @@ Output without --json is one line per message: date | from | subject.`,
 				return fmt.Errorf("imap select: %w", err)
 			}
 
-			criteria := &imap.SearchCriteria{}
-			if unseenOnly {
-				criteria.NotFlag = []imap.Flag{imap.FlagSeen}
-			}
-			if from != "" {
-				criteria.Header = append(criteria.Header, imap.SearchCriteriaHeaderField{Key: "FROM", Value: from})
-			}
-			if subject != "" {
-				criteria.Header = append(criteria.Header, imap.SearchCriteriaHeaderField{Key: "SUBJECT", Value: subject})
-			}
+			var uids []imap.UID
 
-			searchData, err := client.Search(criteria)
-			if err != nil {
-				return fmt.Errorf("imap search: %w", err)
-			}
+			if msgUID > 0 {
+				uids = []imap.UID{imap.UID(msgUID)}
+			} else {
+				criteria := &imap.SearchCriteria{}
+				if unseenOnly {
+					criteria.NotFlag = []imap.Flag{imap.FlagSeen}
+				}
+				if from != "" {
+					criteria.Header = append(criteria.Header, imap.SearchCriteriaHeaderField{Key: "FROM", Value: from})
+				}
+				if subject != "" {
+					criteria.Header = append(criteria.Header, imap.SearchCriteriaHeaderField{Key: "SUBJECT", Value: subject})
+				}
 
-			uidSet, ok := searchData.All.(imap.UIDSet)
-			if !ok {
-				if useJSON {
-					fmt.Println("[]")
-				} else {
-					fmt.Println("no messages")
+				searchData, err := client.Search(criteria)
+				if err != nil {
+					return fmt.Errorf("imap search: %w", err)
 				}
-				return nil
-			}
-			uids, ok := uidSet.Nums()
-			if !ok || len(uids) == 0 {
-				if useJSON {
-					fmt.Println("[]")
-				} else {
-					fmt.Println("no messages")
+
+				uidSet, ok := searchData.All.(imap.UIDSet)
+				if !ok {
+					if useJSON {
+						fmt.Println("[]")
+					} else {
+						fmt.Println("no messages")
+					}
+					return nil
 				}
-				return nil
-			}
-			if limit > 0 && uint(len(uids)) > limit {
-				uids = uids[len(uids)-int(limit):]
+				found, ok := uidSet.Nums()
+				if !ok || len(found) == 0 {
+					if useJSON {
+						fmt.Println("[]")
+					} else {
+						fmt.Println("no messages")
+					}
+					return nil
+				}
+				uids = found
+				if limit > 0 && uint(len(uids)) > limit {
+					uids = uids[len(uids)-int(limit):]
+				}
 			}
 
 			msgs, err := client.FetchMessages(uids)
@@ -701,13 +715,19 @@ Output without --json is one line per message: date | from | subject.`,
 				if parsed == nil {
 					parsed = []read.Message{}
 				}
+				if headersOnly {
+					for i := range parsed {
+						parsed[i].BodyText = ""
+						parsed[i].BodyHTML = ""
+					}
+				}
 				fmt.Println(jsonString(parsed))
 			} else {
 				if len(parsed) == 0 {
 					fmt.Println("no messages")
 				} else {
 					for _, msg := range parsed {
-						fmt.Printf("%s | %s | %s\n",
+						fmt.Printf("%s\t%s\t%s\n",
 							msg.Date.Format("2006-01-02 15:04"),
 							msg.From,
 							msg.Subject,
@@ -725,6 +745,8 @@ Output without --json is one line per message: date | from | subject.`,
 	cmd.Flags().StringVar(&subject, "subject", "", "filter by Subject (substring)")
 	cmd.Flags().BoolVar(&unseenOnly, "unseen-only", false, "only unseen messages")
 	cmd.Flags().BoolVar(&useJSON, "json", false, "output as JSON array")
+	cmd.Flags().BoolVar(&headersOnly, "headers-only", false, "omit body_text/body_html from JSON output")
+	cmd.Flags().UintVar(&msgUID, "uid", 0, "fetch a single message by IMAP UID")
 
 	return cmd
 }
