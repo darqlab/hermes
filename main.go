@@ -596,38 +596,62 @@ func readCmd() *cobra.Command {
 		Short: "Read messages from IMAP mailbox",
 		Long: `Connect to the configured IMAP server, select a mailbox, search for
 messages, and print them. By default fetches the most recent 10 messages
-from INBOX.
+from INBOX as tab-delimited lines (date\tfrom\tsubject).
 
-Filters (--from, --subject, --body) are substring matches. --since and
---before restrict by date (YYYY-MM-DD format). When multiple filters
-are set they are combined with AND — all must match. --from and --subject
-search message headers; --body searches the message body text.
+All search is server-side (IMAP SEARCH): no client-side filtering.
 
---uid fetches exactly one message by IMAP UID (incompatible with --limit,
---from, --subject, --body, --since, --before, --unseen-only). --headers-only drops body_text and
-body_html from JSON output (text mode is already body-free).
+Search filters (all optional, combined with AND when multiple are set):
+  --from STRING       From header substring
+  --subject STRING    Subject header substring
+  --body STRING       Message body substring
+  --unseen-only       Only messages without \Seen flag
+  --since YYYY-MM-DD  Messages on or after this date
+  --before YYYY-MM-DD Messages before this date
 
-Exit codes: 0 on success (including zero matching messages), 1 on
-connect/auth/mailbox error or when --json is set and the request fails.
+Output mode (mutually exclusive):
+  --uid N             Fetch exactly one message by IMAP UID (overrides all
+                      search filters and --limit)
+  --limit N           Max messages to return (default 10; takes the most
+                      recent N when combined with search)
 
-Output with --json is a JSON array of message objects:
-  [
-    {
-      "uid": 42,
-      "seq_num": 7,
-      "from": "Name <user@example.com>",
-      "to": ["recipient@example.com"],
-      "subject": "Hello",
-      "date": "2026-01-15T10:30:00Z",
-      "flags": ["\\Seen"],
-      "body_text": "plain text body",
-      "body_html": "<p>html body</p>",
-      "attachments": [
-        {"filename": "report.pdf", "content_type": "application/pdf", "size_bytes": 1234}
-      ]
-    }
-  ]
-Output without --json is one line per message: date\tfrom\tsubject.`,
+Output format:
+  --json              JSON array of message objects (full body fields)
+  --headers-only      Strip body_text/body_html from JSON (text mode is
+                      already body-free; this flag has no effect without
+                      --json)
+  default (no --json) Tab-delimited: "YYYY-MM-DD HH:MM\tfrom\tsubject"
+                      per line. No body content. Empty result prints
+                      "no messages".
+
+Exit codes: 0 on success (zero matches is success), 1 on any error
+(connect, auth, mailbox not found, search failure, fetch failure).
+Per-message parse failures are skipped+logged, not fatal.
+
+JSON output shape (exact, as emitted):
+  Success (stdout, exit 0):
+    [
+      {
+        "uid": 42,
+        "seq_num": 7,
+        "from": "Name <addr>",
+        "to": ["Name <addr>", ...],
+        "cc": ["Name <addr>", ...],     // omitted if empty
+        "subject": "decoded subject",
+        "date": "2026-01-15T10:30:00Z",  // RFC3339 UTC
+        "flags": ["\\Seen", "\\Recent", ...],
+        "body_text": "plain text",       // omitted when --headers-only
+        "body_html": "<p>html</p>",      // omitted when --headers-only
+        "attachments": [                 // omitted if none
+          {"filename": "report.pdf", "content_type": "application/pdf", "size_bytes": 1234}
+        ]
+      }
+    ]
+    Zero matches: [] (empty array, exit 0)
+  Failure (stderr, exit 1): unstructured Go error message
+
+Config: uses imap.host, imap.port, imap.user, imap.pass from config
+file or HERMES_IMAP_* env vars. Defaults: port=993, use_tls=true.
+Send-only users do not need any imap.* config.`,
 		Example: `  hermes read
   hermes read --mailbox INBOX --limit 5 --unseen-only
   hermes read --from "alert@example.com" --subject "disk full"
@@ -789,16 +813,26 @@ func watchCmd() *cobra.Command {
 		Use:   "watch",
 		Short: "Watch mailbox for new messages (IDLE)",
 		Long: `Connect to the configured IMAP server, select a mailbox, and watch
-for new messages using IMAP IDLE. When the server does not support IDLE,
-falls back to polling at --poll-interval (default 30s).
+for new messages using IMAP IDLE (RFC 2177). Falls back to polling at
+--poll-interval (default 30s) when the server lacks IDLE support.
 
-New messages are printed as they arrive. With --json, output is one JSON
-object per line (JSON Lines), so an agent can stream-read without
-buffering. Without --json, each message is printed as "date | from |
-subject" on a single line.
+Runs until killed (SIGINT/SIGTERM — sends clean LOGOUT on shutdown).
+Reconnects with exponential backoff on connection drop (base 1s, cap 30s).
 
-Runs until killed (SIGINT/SIGTERM). Reconnects with exponential backoff
-on connection drop. Exit 0 on clean shutdown.`,
+Output format:
+  --json              One JSON object per line (JSON Lines): each new
+                      message is printed as a single line of JSON, so
+                      an agent can stream-read line-by-line without
+                      buffering. Same shape as "hermes read --json"
+                      (all fields: uid, from, to, subject, date, flags,
+                      body_text, body_html, attachments).
+  default (no --json) Tab-delimited: "YYYY-MM-DD HH:MM\tfrom\tsubject"
+                      per line, one line per new message.
+
+Exit codes: 0 on clean shutdown (SIGINT/SIGTERM), 1 on connect/auth/
+mailbox error at startup. Per-message parse failures are skipped+logged.
+
+Config: same as "hermes read" (imap.host/port/user/pass).`,
 		Example: `  hermes watch
   hermes watch --mailbox INBOX --json
   hermes watch --poll-interval 10s`,
@@ -822,7 +856,7 @@ on connection drop. Exit 0 on clean shutdown.`,
 				if useJSON {
 					fmt.Println(strings.TrimSpace(jsonString(msg)))
 				} else {
-					fmt.Printf("%s | %s | %s\n",
+					fmt.Printf("%s\t%s\t%s\n",
 						msg.Date.Format("2006-01-02 15:04"),
 						msg.From,
 						msg.Subject,
