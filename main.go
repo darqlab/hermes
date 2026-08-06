@@ -832,7 +832,16 @@ Output format:
 Exit codes: 0 on clean shutdown (SIGINT/SIGTERM), 1 on connect/auth/
 mailbox error at startup. Per-message parse failures are skipped+logged.
 
-Config: same as "hermes read" (imap.host/port/user/pass).`,
+Config: same as "hermes read" (imap.host/port/user/pass).
+
+Configuration (IMAP):
+  imap.host / HERMES_IMAP_HOST        — required
+  imap.port / HERMES_IMAP_PORT        — default 993
+  imap.user / HERMES_IMAP_USER        — required
+  imap.pass / HERMES_IMAP_PASS        — required
+  imap.use_tls / HERMES_IMAP_USE_TLS  — default true (true/1 to enable)
+  imap.starttls / HERMES_IMAP_STARTTLS — default false (false/0 to disable)
+  Only required for read/watch — send works without any imap.* config present.`,
 		Example: `  hermes watch
   hermes watch --mailbox INBOX --json
   hermes watch --poll-interval 10s`,
