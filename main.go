@@ -807,14 +807,16 @@ func watchCmd() *cobra.Command {
 		mailbox      string
 		pollInterval time.Duration
 		useJSON      bool
+		noIDLE       bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "watch",
-		Short: "Watch mailbox for new messages (IDLE)",
+		Short: "Watch mailbox for new messages (IDLE or poll)",
 		Long: `Connect to the configured IMAP server, select a mailbox, and watch
 for new messages using IMAP IDLE (RFC 2177). Falls back to polling at
---poll-interval (default 30s) when the server lacks IDLE support.
+--poll-interval (default 30s) when the server lacks IDLE support or
+--no-idle is set.
 
 Runs until killed (SIGINT/SIGTERM — sends clean LOGOUT on shutdown).
 Reconnects with exponential backoff on connection drop (base 1s, cap 30s).
@@ -844,7 +846,8 @@ Configuration (IMAP):
   Only required for read/watch — send works without any imap.* config present.`,
 		Example: `  hermes watch
   hermes watch --mailbox INBOX --json
-  hermes watch --poll-interval 10s`,
+  hermes watch --poll-interval 10s
+  hermes watch --no-idle --poll-interval 5s`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
@@ -861,6 +864,7 @@ Configuration (IMAP):
 				Pass:         cfg.IMAP.Pass,
 				Mailbox:      mailbox,
 				PollInterval: pollInterval,
+				NoIDLE:       noIDLE,
 			}, func(msg read.Message) error {
 				if useJSON {
 					fmt.Println(strings.TrimSpace(jsonString(msg)))
@@ -877,8 +881,9 @@ Configuration (IMAP):
 	}
 
 	cmd.Flags().StringVar(&mailbox, "mailbox", "INBOX", "mailbox to watch")
-	cmd.Flags().DurationVar(&pollInterval, "poll-interval", 30*time.Second, "poll interval when IDLE unavailable")
+	cmd.Flags().DurationVar(&pollInterval, "poll-interval", 30*time.Second, "poll interval when IDLE unavailable or --no-idle")
 	cmd.Flags().BoolVar(&useJSON, "json", false, "output as JSON Lines")
+	cmd.Flags().BoolVar(&noIDLE, "no-idle", false, "force poll mode (disable IMAP IDLE)")
 
 	return cmd
 }

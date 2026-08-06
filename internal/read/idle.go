@@ -23,6 +23,7 @@ type WatchConfig struct {
 	Pass         string
 	Mailbox      string
 	PollInterval time.Duration
+	NoIDLE       bool
 }
 
 func hasCapIDLE(client *imapclient.Client) bool {
@@ -59,31 +60,94 @@ func Watch(ctx context.Context, cfg WatchConfig, onMessage func(Message) error) 
 	}
 }
 
+func highestUID(client *imapclient.Client) (imap.UID, error) {
+	data, err := client.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+	if err != nil {
+		return 0, fmt.Errorf("uid search: %w", err)
+	}
+	uids := data.AllUIDs()
+	if len(uids) == 0 {
+		return 0, nil
+	}
+	return uids[len(uids)-1], nil
+}
+
+func fetchAndProcess(cl *imapclient.Client, uids []imap.UID, onMessage func(Message) error) error {
+	if len(uids) == 0 {
+		return nil
+	}
+	uidSet := imap.UIDSetNum(uids...)
+	msgs, err := cl.Fetch(uidSet, &imap.FetchOptions{
+		UID:          true,
+		Flags:        true,
+		Envelope:     true,
+		InternalDate: true,
+		BodySection: []*imap.FetchItemBodySection{{
+			Peek: true,
+		}},
+	}).Collect()
+	if err != nil {
+		return fmt.Errorf("fetch new messages: %w", err)
+	}
+
+	for _, buf := range msgs {
+		raw := RawMessage{
+			UID:          buf.UID,
+			SeqNum:       buf.SeqNum,
+			Flags:        buf.Flags,
+			Envelope:     buf.Envelope,
+			InternalDate: buf.InternalDate,
+		}
+		for _, bs := range buf.BodySection {
+			raw.BodyData = bs.Bytes
+			break
+		}
+
+		msg, err := ParseMessage(raw)
+		if err != nil {
+			log.Printf("parse message uid %v: %v", buf.UID, err)
+			continue
+		}
+
+		if err := onMessage(*msg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func watchOnce(ctx context.Context, cfg WatchConfig, onMessage func(Message) error) error {
-	client, err := DialTLS(cfg.Host, cfg.Port)
+	cl, err := DialTLS(cfg.Host, cfg.Port)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer cl.Close()
 
-	if err := client.Login(cfg.User, cfg.Pass); err != nil {
+	if err := cl.Login(cfg.User, cfg.Pass); err != nil {
 		return err
 	}
 
-	selectData, err := client.Select(cfg.Mailbox)
+	if _, err := cl.Select(cfg.Mailbox); err != nil {
+		return err
+	}
+
+	lastUID, err := highestUID(cl.client)
 	if err != nil {
 		return err
 	}
-	lastSeen := selectData.NumMessages
 
-	useIDLE := hasCapIDLE(client.client)
+	useIDLE := !cfg.NoIDLE && hasCapIDLE(cl.client)
 	if !useIDLE {
-		log.Printf("server does not support IDLE, falling back to poll (%s)", cfg.PollInterval)
+		if cfg.NoIDLE {
+			log.Printf("idle disabled, polling every %s", cfg.PollInterval)
+		} else {
+			log.Printf("server does not support IDLE, falling back to poll (%s)", cfg.PollInterval)
+		}
 	}
 
 	for {
 		if useIDLE {
-			idleCmd, err := client.client.Idle()
+			idleCmd, err := cl.client.Idle()
 			if err != nil {
 				log.Printf("idle error: %v, switching to poll", err)
 				useIDLE = false
@@ -116,68 +180,26 @@ func watchOnce(ctx context.Context, cfg WatchConfig, onMessage func(Message) err
 			}
 		}
 
-		status, err := client.client.Status(cfg.Mailbox, &imap.StatusOptions{NumMessages: true}).Wait()
+		var uidSet imap.UIDSet
+		uidSet.AddRange(lastUID+1, 0)
+		data, err := cl.client.UIDSearch(&imap.SearchCriteria{UID: []imap.UIDSet{uidSet}}, nil).Wait()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("status: %w", err)
+			return fmt.Errorf("uid search: %w", err)
 		}
 
-		current := uint32(0)
-		if status.NumMessages != nil {
-			current = *status.NumMessages
+		newUIDs := data.AllUIDs()
+		if len(newUIDs) == 0 {
+			continue
 		}
-		if current > lastSeen {
-			newCount := current - lastSeen
-			log.Printf("found %d new message(s)", newCount)
 
-			start := lastSeen + 1
-			uids := make([]imap.UID, 0, newCount)
-			for i := uint32(0); i < newCount; i++ {
-				uids = append(uids, imap.UID(start+i))
-			}
+		log.Printf("found %d new message(s)", len(newUIDs))
 
-			uidSet := imap.UIDSetNum(uids...)
-			msgs, err := client.client.Fetch(uidSet, &imap.FetchOptions{
-				UID:          true,
-				Flags:        true,
-				Envelope:     true,
-				InternalDate: true,
-				BodySection: []*imap.FetchItemBodySection{{
-					Peek: true,
-				}},
-			}).Collect()
-			if err != nil {
-				log.Printf("fetch new messages failed: %v", err)
-				lastSeen = current
-				continue
-			}
-
-			for _, buf := range msgs {
-				raw := RawMessage{
-					UID:          buf.UID,
-					SeqNum:       buf.SeqNum,
-					Flags:        buf.Flags,
-					Envelope:     buf.Envelope,
-					InternalDate: buf.InternalDate,
-				}
-				for _, bs := range buf.BodySection {
-					raw.BodyData = bs.Bytes
-					break
-				}
-
-				msg, err := ParseMessage(raw)
-				if err != nil {
-					log.Printf("parse message uid %v: %v", buf.UID, err)
-					continue
-				}
-
-				if err := onMessage(*msg); err != nil {
-					return err
-				}
-			}
+		if err := fetchAndProcess(cl.client, newUIDs, onMessage); err != nil {
+			return err
 		}
-		lastSeen = current
+		lastUID = newUIDs[len(newUIDs)-1]
 	}
 }
