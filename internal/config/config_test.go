@@ -45,6 +45,7 @@ func TestDefaults(t *testing.T) {
 func clearHermesEnv(t *testing.T) {
 	t.Helper()
 	vars := []string{
+		"HERMES_FROM",
 		"HERMES_SMTP_HOST",
 		"HERMES_SMTP_PORT",
 		"HERMES_SMTP_USER",
@@ -58,6 +59,12 @@ func clearHermesEnv(t *testing.T) {
 		"HERMES_QUEUE_RETRY_MAX",
 		"HERMES_QUEUE_BACKOFF_BASE",
 		"HERMES_QUEUE_BACKOFF_CAP",
+		"HERMES_IMAP_HOST",
+		"HERMES_IMAP_PORT",
+		"HERMES_IMAP_USER",
+		"HERMES_IMAP_PASS",
+		"HERMES_IMAP_USE_TLS",
+		"HERMES_IMAP_STARTTLS",
 	}
 	for _, v := range vars {
 		t.Setenv(v, "")
@@ -367,5 +374,109 @@ func TestBackoffDurationParsing(t *testing.T) {
 	}
 	if _, err := time.ParseDuration("not-a-duration"); err == nil {
 		t.Fatalf("expected not-a-duration to fail parsing")
+	}
+}
+
+func TestDefaults_IMAP(t *testing.T) {
+	cfg := Defaults()
+	if cfg.IMAP.Port != 993 {
+		t.Errorf("IMAP.Port = %d, want 993", cfg.IMAP.Port)
+	}
+	if !cfg.IMAP.UseTLS {
+		t.Errorf("IMAP.UseTLS = false, want true")
+	}
+}
+
+func TestLoad_ValidYAMLWithIMAP(t *testing.T) {
+	clearHermesEnv(t)
+
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	yamlContent := `
+smtp:
+  host: smtp.example.com
+  user: alice
+  pass: secret
+imap:
+  host: imap.example.com
+  port: 993
+  user: bob
+  pass: imap-secret
+  use_tls: true
+  starttls: false
+`
+	os.WriteFile(path, []byte(yamlContent), 0600)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.IMAP.Host != "imap.example.com" {
+		t.Errorf("IMAP.Host = %q", cfg.IMAP.Host)
+	}
+	if cfg.IMAP.User != "bob" {
+		t.Errorf("IMAP.User = %q", cfg.IMAP.User)
+	}
+	if cfg.IMAP.Pass != "imap-secret" {
+		t.Errorf("IMAP.Pass = %q", cfg.IMAP.Pass)
+	}
+	if !cfg.IMAP.UseTLS {
+		t.Errorf("IMAP.UseTLS = false, want true")
+	}
+	if cfg.IMAP.StartTLS {
+		t.Errorf("IMAP.StartTLS = true, want false")
+	}
+}
+
+func TestApplyEnvOverrides_IMAP(t *testing.T) {
+	tests := []struct {
+		name   string
+		envVar string
+		envVal string
+		check  func(*Config) bool
+	}{
+		{"imap host", "HERMES_IMAP_HOST", "imap.example.com", func(c *Config) bool { return c.IMAP.Host == "imap.example.com" }},
+		{"imap port", "HERMES_IMAP_PORT", "2222", func(c *Config) bool { return c.IMAP.Port == 2222 }},
+		{"imap user", "HERMES_IMAP_USER", "bob", func(c *Config) bool { return c.IMAP.User == "bob" }},
+		{"imap pass", "HERMES_IMAP_PASS", "hunter2", func(c *Config) bool { return c.IMAP.Pass == "hunter2" }},
+		{"imap use_tls true", "HERMES_IMAP_USE_TLS", "true", func(c *Config) bool { return c.IMAP.UseTLS == true }},
+		{"imap starttls false", "HERMES_IMAP_STARTTLS", "false", func(c *Config) bool { return c.IMAP.StartTLS == false }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearHermesEnv(t)
+			t.Setenv(tt.envVar, tt.envVal)
+			cfg := Defaults()
+			applyEnvOverrides(cfg)
+			if !tt.check(cfg) {
+				t.Errorf("%s: applyEnvOverrides did not apply %s=%s as expected", tt.name, tt.envVar, tt.envVal)
+			}
+		})
+	}
+}
+
+func TestValidate_NoIMAPRequired(t *testing.T) {
+	clearHermesEnv(t)
+
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	yamlContent := `
+smtp:
+  host: smtp.example.com
+  user: alice
+  pass: secret
+`
+	os.WriteFile(path, []byte(yamlContent), 0600)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("AT-11 regression: Load(send-only config) error = %v, want nil (IMAP must not be required)", err)
+	}
+	if cfg.IMAP.Host != "" {
+		t.Errorf("IMAP.Host = %q, want empty (IMAP fields should remain at defaults when not configured)", cfg.IMAP.Host)
+	}
+	if cfg.IMAP.Port != 993 {
+		t.Errorf("IMAP.Port = %d, want 993 (default should still apply)", cfg.IMAP.Port)
 	}
 }
