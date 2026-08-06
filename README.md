@@ -4,13 +4,11 @@ Send and read email from the terminal. Designed for **shell scripts** and **LLM 
 
 ```
 hermes send --to ops@x.com --subject "Disk 90%" --body "sda1 at 92%"
-cat report.csv | hermes send --to team@x.com --subject "Weekly" --attach report.csv
-hermes queue list
-hermes read --json --limit 5 --mailbox INBOX       # coming in v0.2
-hermes watch --json --mailbox Orders                # coming in v0.2
+hermes read --unseen-only --limit 5
+hermes watch --json
 ```
 
-**Current status:** v0.1 — send engine complete. IMAP reader coming in v0.2.
+**Current status:** v0.0.8 — send + read + watch all live.
 
 ## Install
 
@@ -81,6 +79,8 @@ Hermes reads `hermes.yaml` from the current directory (or `--config <path>`). Al
 
 ```yaml
 # hermes.yaml
+from: "forge@example.com"     # default envelope/header From; falls back to smtp.user if unset
+
 smtp:
   host: smtp.example.com
   port: 587
@@ -88,6 +88,14 @@ smtp:
   pass: ""                    # or set HERMES_SMTP_PASS
   use_tls: false              # direct TLS (port 465)
   starttls: true              # STARTTLS upgrade (port 587)
+
+imap:
+  host: imap.example.com
+  port: 993
+  user: alerts@example.com
+  pass: ""                    # or set HERMES_IMAP_PASS
+  use_tls: true               # direct TLS (port 993) — IMAP convention
+  starttls: false
 
 dkim:
   selector: hermes
@@ -109,26 +117,26 @@ log:
 ### Env var overrides
 
 ```
-HERMES_SMTP_HOST=smtp.example.com
-HERMES_SMTP_PORT=587
-HERMES_SMTP_USER=alerts@example.com
-HERMES_SMTP_PASS=secret
-HERMES_SMTP_USE_TLS=true
-HERMES_SMTP_STARTTLS=false
-HERMES_DKIM_SELECTOR=hermes
-HERMES_DKIM_DOMAIN=example.com
+HERMES_FROM=forge@example.com
+HERMES_SMTP_HOST=smtp.example.com  HERMES_SMTP_PORT=587
+HERMES_SMTP_USER=alerts@x.com      HERMES_SMTP_PASS=secret
+HERMES_SMTP_USE_TLS=true           HERMES_SMTP_STARTTLS=false
+HERMES_DKIM_SELECTOR=hermes        HERMES_DKIM_DOMAIN=example.com
 HERMES_DKIM_KEY_FILE=/secrets/dkim.key
-HERMES_QUEUE_QUEUE_FILE=hermes_queue.json
-HERMES_QUEUE_RETRY_MAX=10
-HERMES_QUEUE_BACKOFF_BASE=1s
-HERMES_QUEUE_BACKOFF_CAP=5m
+HERMES_QUEUE_QUEUE_FILE=hermes_queue.json  HERMES_QUEUE_RETRY_MAX=10
+HERMES_QUEUE_BACKOFF_BASE=1s       HERMES_QUEUE_BACKOFF_CAP=5m
+HERMES_IMAP_HOST=imap.example.com  HERMES_IMAP_PORT=993
+HERMES_IMAP_USER=alerts@x.com      HERMES_IMAP_PASS=secret
+HERMES_IMAP_USE_TLS=true           HERMES_IMAP_STARTTLS=false
 ```
 
-Config file values take precedence (env vars only apply if no config file exists or the value is empty).
+Env vars override config file values. imap.* fields are only required for `read`/`watch` — `send` works without any imap config present.
 
 ## Commands
 
 ### `hermes send`
+
+Send email via SMTP. Composes MIME (plain/HTML/multipart/attachments), DKIM-signs, delivers. On failure, enqueues to the persistent retry queue.
 
 ```bash
 # Plain text
@@ -155,8 +163,11 @@ hermes send --to team@x.com --subject "Report" \
 
 # JSON output (machine-readable)
 hermes send --json --to user@x.com --subject "Test" --body "ok"
+# → {"status":"ok","server":"2.0.0 OK: queued as ..."}
+
+# Quiet success output (LLM-friendly, minimal tokens)
+hermes send --json --quiet --to user@x.com --subject "Test" --body "ok"
 # → {"status":"ok"}
-# → {"status":"queued","job_id":"abc123...","error":"connection refused"}
 
 # Dry-run (print composed MIME, don't send)
 hermes send --dry-run --to test@x.com --subject "Preview" --body "hi"
@@ -167,6 +178,73 @@ hermes send --no-queue --to user@x.com --subject "Urgent" --body "..."
 # Skip DKIM signing
 hermes send --no-sign --to user@x.com --subject "Test" --body "..."
 ```
+
+### `hermes read`
+
+Fetch messages from an IMAP mailbox. Server-side search with multiple filters (combined with AND).
+
+```bash
+# Most recent 10 messages from INBOX (tab-delimited: date\tfrom\tsubject)
+hermes read
+
+# Unread only
+hermes read --unseen-only --limit 5
+
+# Filter by sender
+hermes read --from "alert@example.com" --limit 10
+
+# Filter by subject
+hermes read --subject "disk full"
+
+# Filter by message body
+hermes read --body "urgent"
+
+# Date range
+hermes read --since 2026-08-01 --before 2026-08-05
+
+# Combined filters (AND)
+hermes read --from "joven" --since 2026-08-03 --unseen-only
+
+# Fetch a single message by IMAP UID
+hermes read --uid 42 --json
+
+# JSON output (full body fields)
+hermes read --json --limit 20
+
+# JSON headers-only (no body_text/body_html — low-token for triage)
+hermes read --json --headers-only --limit 20
+
+# Specific mailbox
+hermes read --mailbox Sent --limit 5
+```
+
+**Output formats:**
+- Default (text): `2026-08-05 07:11\tSender Name <addr>\tSubject` per line
+- JSON (`--json`): array of objects with `uid`, `from`, `to`, `cc`, `subject`, `date`, `flags`, `body_text`, `body_html`, `attachments`
+- Zero matches: `[]` (JSON) or `no messages` (text), exit 0
+
+### `hermes watch`
+
+Watch a mailbox for new messages using IMAP IDLE (falls back to polling when IDLE unavailable). Runs until killed (SIGINT/SIGTERM).
+
+```bash
+# Watch INBOX (tab-delimited output per new message)
+hermes watch
+
+# JSON Lines output (one JSON object per line, streamable)
+hermes watch --json
+
+# Custom poll interval when IDLE unavailable
+hermes watch --poll-interval 10s
+
+# Watch a specific mailbox
+hermes watch --mailbox Orders
+
+# Background watch, log to file
+hermes watch --json >> watch.log &
+```
+
+Reconnects with exponential backoff on connection drop (1s → 2s → 4s → ... → 30s cap).
 
 ### `hermes queue`
 
@@ -203,9 +281,10 @@ hermes queue purge
 
 | Code | Meaning |
 |------|---------|
-| 0 | Sent successfully |
-| 1 | Transient failure — message queued for retry |
-| 2 | Permanent failure (config error, auth rejected) |
+| 0 | Success (send delivered; read/watch completed; zero matches is success) |
+| 1 | Any failure (config, auth, delivery, connect, search, parse) |
+
+Structured failure info is in JSON status fields or stderr — not in exit code space.
 
 ## LLM integration patterns
 
@@ -215,15 +294,11 @@ hermes queue purge
 hermes send --to ops@x.com --subject "Task done" --body "$OUTPUT"
 ```
 
-### Pattern 2 — send with fallback to queue
+### Pattern 2 — send with quiet JSON output (lowest token cost)
 
 ```bash
-hermes send --json --to user@x.com --subject "..." --body "..."
-case $? in
-  0) echo "Delivered" ;;
-  1) echo "Queued for retry" ;;
-  2) echo "Permanent failure" ;;
-esac
+hermes send --json --quiet --to user@x.com --subject "..." --body "..."
+# → {"status":"ok"}
 ```
 
 ### Pattern 3 — attach output from a pipeline
@@ -232,20 +307,31 @@ esac
 some-command 2>&1 | hermes send --to dev@x.com --subject "Pipeline output"
 ```
 
-### Pattern 4 — dry-run to preview what will be sent
+### Pattern 4 — read recent unseen messages (triage)
 
 ```bash
-hermes send --dry-run --to test@x.com --subject "Preview" \
-  --body "Content" --body-html "<h1>Content</h1>"
+hermes read --unseen-only --json --headers-only
+# returns metadata only, no body blob
 ```
 
-## Roadmap
+### Pattern 5 — search by sender and date (contextual lookup)
 
-| Version | What |
-|---------|------|
-| v0.1 | SMTP send, DKIM signing, JSON-file queue with retry, CLI |
-| v0.2 | IMAP reader: `hermes read`, `hermes watch` (IDLE), MIME parsing |
-| v0.3 | Docker deployment, daemon mode with HTTP control plane |
+```bash
+hermes read --from "joven" --since 2026-08-01 --json --headers-only
+```
+
+### Pattern 6 — fetch a specific message thread
+
+```bash
+hermes read --uid 42 --json     # fetch one message
+hermes read --subject "Deploy"  # all messages with "Deploy" in subject
+```
+
+### Pattern 7 — stream-watch for incoming mail
+
+```bash
+hermes watch --json              # one JSON object per line as mail arrives
+```
 
 ## License
 
