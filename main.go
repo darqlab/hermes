@@ -127,6 +127,7 @@ func sendCmd() *cobra.Command {
 		noQueue   bool
 		dryRun    bool
 		noSign    bool
+		quiet     bool
 	)
 
 	cmd := &cobra.Command{
@@ -158,11 +159,17 @@ a dry run.
 
 --no-sign skips DKIM signing even if dkim.key_file is configured.
 
+--quiet suppresses success output to reduce token cost for LLM agents. With
+--json, the "server" field is omitted (only {"status":"ok"}). Without --json,
+nothing is printed on success. Failure and queued outputs are unaffected.
+
 --json switches stdout/stderr to a single JSON object per invocation instead
 of log lines, for scripting. Exact shapes (fields as actually emitted by
 main.go):
   Success (stdout, exit 0):
     {"status":"ok","server":"<SMTP server response>"}
+  Success with --quiet (stdout, exit 0):
+    {"status":"ok"}
   Delivery failed, queued for retry (stdout, exit 1):
     {"status":"queued","job_id":"<uuid>","error":"<delivery error>"}
   Delivery failed with --no-queue (stderr, exit 1):
@@ -300,11 +307,17 @@ main.go):
 			}
 
 			if useJSON {
-				fmt.Println(jsonString(map[string]any{
-					"status": "ok",
-					"server": resp,
-				}))
-			} else {
+				if quiet {
+					fmt.Println(jsonString(map[string]any{
+						"status": "ok",
+					}))
+				} else {
+					fmt.Println(jsonString(map[string]any{
+						"status": "ok",
+						"server": resp,
+					}))
+				}
+			} else if !quiet {
 				log.Printf("sent successfully — %s", resp)
 			}
 			return nil
@@ -324,6 +337,7 @@ main.go):
 	cmd.Flags().BoolVar(&noQueue, "no-queue", false, "fail immediately on delivery error (don't enqueue)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "compose and print MIME to stdout, don't send")
 	cmd.Flags().BoolVar(&noSign, "no-sign", false, "skip DKIM signing")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output (with --json: omit server response; without --json: print nothing on success)")
 
 	return cmd
 }
