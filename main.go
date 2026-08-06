@@ -587,6 +587,8 @@ func readCmd() *cobra.Command {
 		useJSON     bool
 		headersOnly bool
 		msgUID      uint
+		since       string
+		before      string
 	)
 
 	cmd := &cobra.Command{
@@ -596,12 +598,13 @@ func readCmd() *cobra.Command {
 messages, and print them. By default fetches the most recent 10 messages
 from INBOX.
 
-Filters (--from, --subject, --body) are substring matches. When multiple filters
+Filters (--from, --subject, --body) are substring matches. --since and
+--before restrict by date (YYYY-MM-DD format). When multiple filters
 are set they are combined with AND — all must match. --from and --subject
 search message headers; --body searches the message body text.
 
 --uid fetches exactly one message by IMAP UID (incompatible with --limit,
---from, --subject, --body, --unseen-only). --headers-only drops body_text and
+--from, --subject, --body, --since, --before, --unseen-only). --headers-only drops body_text and
 body_html from JSON output (text mode is already body-free).
 
 Exit codes: 0 on success (including zero matching messages), 1 on
@@ -629,6 +632,7 @@ Output without --json is one line per message: date\tfrom\tsubject.`,
   hermes read --mailbox INBOX --limit 5 --unseen-only
   hermes read --from "alert@example.com" --subject "disk full"
   hermes read --body "urgent" --limit 20
+  hermes read --since 2026-08-01 --before 2026-08-05
   hermes read --json --limit 20 --headers-only
   hermes read --uid 42 --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -671,6 +675,20 @@ Output without --json is one line per message: date\tfrom\tsubject.`,
 				}
 				if body != "" {
 					criteria.Body = append(criteria.Body, body)
+				}
+				if since != "" {
+					t, err := time.Parse("2006-01-02", since)
+					if err != nil {
+						return fmt.Errorf("--since: %w", err)
+					}
+					criteria.Since = t
+				}
+				if before != "" {
+					t, err := time.Parse("2006-01-02", before)
+					if err != nil {
+						return fmt.Errorf("--before: %w", err)
+					}
+					criteria.Before = t
 				}
 
 				searchData, err := client.Search(criteria)
@@ -754,6 +772,8 @@ Output without --json is one line per message: date\tfrom\tsubject.`,
 	cmd.Flags().BoolVar(&useJSON, "json", false, "output as JSON array")
 	cmd.Flags().BoolVar(&headersOnly, "headers-only", false, "omit body_text/body_html from JSON output")
 	cmd.Flags().UintVar(&msgUID, "uid", 0, "fetch a single message by IMAP UID")
+	cmd.Flags().StringVar(&since, "since", "", "messages on or after date (YYYY-MM-DD)")
+	cmd.Flags().StringVar(&before, "before", "", "messages before date (YYYY-MM-DD)")
 
 	return cmd
 }
