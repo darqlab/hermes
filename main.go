@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +17,9 @@ import (
 	"github.com/darqlab/hermes/internal/config"
 	"github.com/darqlab/hermes/internal/mail"
 	"github.com/darqlab/hermes/internal/queue"
+	"github.com/darqlab/hermes/internal/read"
+
+	"github.com/emersion/go-imap/v2"
 )
 
 var version = "dev"
@@ -32,12 +37,14 @@ Hermes is a single static binary with no runtime dependencies and no network
 listener. It is designed to be invoked headlessly from shell scripts, cron
 jobs, and LLM agents — not driven interactively.
 
-Status: sending is implemented now ("hermes send", "hermes queue ..."; Phase
-1). Reading/watching mail over IMAP ("hermes read", "hermes watch") is not
-yet implemented (planned Phase 2) — those commands do not currently exist.
+Commands:
+  send    Compose and send email via SMTP.
+  read    Connect IMAP, fetch and parse messages.
+  watch   Watch a mailbox for new messages (IMAP IDLE).
+  queue   Manage the persistent send queue.
 
 Configuration resolution order (later steps override earlier ones):
-  1. Built-in defaults (e.g. smtp.port=587, queue.retry_max=10).
+  1. Built-in defaults (e.g. smtp.port=587, imap.port=993, queue.retry_max=10).
   2. Config file: the path given by --config, else "./hermes.yaml", else
      "~/hermes.yaml" if neither of the above exists. If no config file is
      found at all, Hermes falls back to defaults + env vars only.
@@ -47,7 +54,10 @@ Configuration resolution order (later steps override earlier ones):
        HERMES_SMTP_PASS, HERMES_SMTP_USE_TLS (true/1), HERMES_SMTP_STARTTLS
        (false/0 to disable), HERMES_DKIM_SELECTOR, HERMES_DKIM_DOMAIN,
        HERMES_DKIM_KEY_FILE, HERMES_QUEUE_QUEUE_FILE, HERMES_QUEUE_RETRY_MAX,
-       HERMES_QUEUE_BACKOFF_BASE, HERMES_QUEUE_BACKOFF_CAP.
+       HERMES_QUEUE_BACKOFF_BASE, HERMES_QUEUE_BACKOFF_CAP,
+       HERMES_IMAP_HOST, HERMES_IMAP_PORT, HERMES_IMAP_USER, HERMES_IMAP_PASS,
+       HERMES_IMAP_USE_TLS (true/1), HERMES_IMAP_STARTTLS (false/0 to
+       disable).
 
 Top-level "from" (config file) / HERMES_FROM (env) sets the default envelope-
 and-header From address used when "hermes send --from" is omitted. If unset,
@@ -55,14 +65,16 @@ it falls back to smtp.user.
 
 smtp.host, smtp.user, and smtp.pass are always required (from file or env)
 except for "hermes send --dry-run", which composes a message and prints it
-without touching config or the network at all.
+without touching config or the network at all. imap.host, imap.user, and
+imap.pass are required only for "hermes read" and "hermes watch" — send
+works without any imap.* config present.
 
 Exit codes: 0 on success. Non-zero (1) on any failure — config/validation
 errors, compose errors, delivery failures (including when the message was
-successfully queued for retry: queuing does not count as success), and queue
-command errors. There is no separate code space beyond 0/1 — check stderr
-output or, for "send --json", the JSON "status" field to distinguish failure
-reasons.`,
+successfully queued for retry: queuing does not count as success), and
+IMAP connect/auth/mailbox/parse errors. There is no separate code space
+beyond 0/1 — check stderr output or, for "send --json" and "read --json",
+the JSON "status" field or JSON array to distinguish failure reasons.`,
 		Example: `  # Send a plain-text email using ./hermes.yaml or env-var config
   hermes send --to you@example.com --subject "Hi" --body "Hello there"
 
@@ -81,6 +93,8 @@ func main() {
 
 	rootCmd.AddCommand(sendCmd())
 	rootCmd.AddCommand(queueCmd())
+	rootCmd.AddCommand(readCmd())
+	rootCmd.AddCommand(watchCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -533,4 +547,232 @@ func jsonString(v any) string {
 	enc.SetEscapeHTML(false)
 	enc.Encode(v)
 	return buf.String()
+}
+
+func validateIMAPConfig(cfg *config.Config) error {
+	if cfg.IMAP.Host == "" {
+		return fmt.Errorf("imap.host is required for read/watch (set in config or HERMES_IMAP_HOST)")
+	}
+	if cfg.IMAP.User == "" {
+		return fmt.Errorf("imap.user is required for read/watch (set in config or HERMES_IMAP_USER)")
+	}
+	if cfg.IMAP.Pass == "" {
+		return fmt.Errorf("imap.pass is required for read/watch (set in config or HERMES_IMAP_PASS)")
+	}
+	return nil
+}
+
+func readCmd() *cobra.Command {
+	var (
+		mailbox    string
+		limit      uint
+		from       string
+		subject    string
+		unseenOnly bool
+		useJSON    bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "read",
+		Short: "Read messages from IMAP mailbox",
+		Long: `Connect to the configured IMAP server, select a mailbox, search for
+messages, and print them. By default fetches the most recent 10 messages
+from INBOX.
+
+Filters (--from, --subject) are substring matches. When multiple filters
+are set they are combined with AND — all must match.
+
+Exit codes: 0 on success (including zero matching messages), 1 on
+connect/auth/mailbox error or when --json is set and the request fails.
+
+Output with --json is a JSON array of message objects:
+  [
+    {
+      "uid": 42,
+      "seq_num": 7,
+      "from": "Name <user@example.com>",
+      "to": ["recipient@example.com"],
+      "subject": "Hello",
+      "date": "2026-01-15T10:30:00Z",
+      "flags": ["\\Seen"],
+      "body_text": "plain text body",
+      "body_html": "<p>html body</p>",
+      "attachments": [
+        {"filename": "report.pdf", "content_type": "application/pdf", "size_bytes": 1234}
+      ]
+    }
+  ]
+Output without --json is one line per message: date | from | subject.`,
+		Example: `  hermes read
+  hermes read --mailbox INBOX --limit 5 --unseen-only
+  hermes read --from "alert@example.com" --subject "disk full"
+  hermes read --json --limit 20`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			if err := validateIMAPConfig(cfg); err != nil {
+				return err
+			}
+
+			client, err := read.DialTLS(cfg.IMAP.Host, cfg.IMAP.Port)
+			if err != nil {
+				return fmt.Errorf("imap connect: %w", err)
+			}
+			defer client.Close()
+
+			if err := client.Login(cfg.IMAP.User, cfg.IMAP.Pass); err != nil {
+				return fmt.Errorf("imap auth: %w", err)
+			}
+
+			if _, err := client.Select(mailbox); err != nil {
+				return fmt.Errorf("imap select: %w", err)
+			}
+
+			criteria := &imap.SearchCriteria{}
+			if unseenOnly {
+				criteria.NotFlag = []imap.Flag{imap.FlagSeen}
+			}
+			if from != "" {
+				criteria.Header = append(criteria.Header, imap.SearchCriteriaHeaderField{Key: "FROM", Value: from})
+			}
+			if subject != "" {
+				criteria.Header = append(criteria.Header, imap.SearchCriteriaHeaderField{Key: "SUBJECT", Value: subject})
+			}
+
+			searchData, err := client.Search(criteria)
+			if err != nil {
+				return fmt.Errorf("imap search: %w", err)
+			}
+
+			uidSet, ok := searchData.All.(imap.UIDSet)
+			if !ok {
+				if useJSON {
+					fmt.Println("[]")
+				} else {
+					fmt.Println("no messages")
+				}
+				return nil
+			}
+			uids, ok := uidSet.Nums()
+			if !ok || len(uids) == 0 {
+				if useJSON {
+					fmt.Println("[]")
+				} else {
+					fmt.Println("no messages")
+				}
+				return nil
+			}
+			if limit > 0 && uint(len(uids)) > limit {
+				uids = uids[len(uids)-int(limit):]
+			}
+
+			msgs, err := client.FetchMessages(uids)
+			if err != nil {
+				return fmt.Errorf("imap fetch: %w", err)
+			}
+
+			var parsed []read.Message
+			for _, raw := range msgs {
+				msg, err := read.ParseMessage(raw)
+				if err != nil {
+					log.Printf("skipping message uid %v: %v", raw.UID, err)
+					continue
+				}
+				parsed = append(parsed, *msg)
+			}
+
+			if useJSON {
+				if parsed == nil {
+					parsed = []read.Message{}
+				}
+				fmt.Println(jsonString(parsed))
+			} else {
+				if len(parsed) == 0 {
+					fmt.Println("no messages")
+				} else {
+					for _, msg := range parsed {
+						fmt.Printf("%s | %s | %s\n",
+							msg.Date.Format("2006-01-02 15:04"),
+							msg.From,
+							msg.Subject,
+						)
+					}
+				}
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&mailbox, "mailbox", "INBOX", "mailbox to read")
+	cmd.Flags().UintVar(&limit, "limit", 10, "max messages to return")
+	cmd.Flags().StringVar(&from, "from", "", "filter by From address (substring)")
+	cmd.Flags().StringVar(&subject, "subject", "", "filter by Subject (substring)")
+	cmd.Flags().BoolVar(&unseenOnly, "unseen-only", false, "only unseen messages")
+	cmd.Flags().BoolVar(&useJSON, "json", false, "output as JSON array")
+
+	return cmd
+}
+
+func watchCmd() *cobra.Command {
+	var (
+		mailbox      string
+		pollInterval time.Duration
+		useJSON      bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Watch mailbox for new messages (IDLE)",
+		Long: `Connect to the configured IMAP server, select a mailbox, and watch
+for new messages using IMAP IDLE. When the server does not support IDLE,
+falls back to polling at --poll-interval (default 30s).
+
+New messages are printed as they arrive. With --json, output is one JSON
+object per line (JSON Lines), so an agent can stream-read without
+buffering. Without --json, each message is printed as "date | from |
+subject" on a single line.
+
+Runs until killed (SIGINT/SIGTERM). Reconnects with exponential backoff
+on connection drop. Exit 0 on clean shutdown.`,
+		Example: `  hermes watch
+  hermes watch --mailbox INBOX --json
+  hermes watch --poll-interval 10s`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			if err := validateIMAPConfig(cfg); err != nil {
+				return err
+			}
+
+			return read.Watch(context.Background(), read.WatchConfig{
+				Host:         cfg.IMAP.Host,
+				Port:         cfg.IMAP.Port,
+				User:         cfg.IMAP.User,
+				Pass:         cfg.IMAP.Pass,
+				Mailbox:      mailbox,
+				PollInterval: pollInterval,
+			}, func(msg read.Message) error {
+				if useJSON {
+					fmt.Println(strings.TrimSpace(jsonString(msg)))
+				} else {
+					fmt.Printf("%s | %s | %s\n",
+						msg.Date.Format("2006-01-02 15:04"),
+						msg.From,
+						msg.Subject,
+					)
+				}
+				return nil
+			})
+		},
+	}
+
+	cmd.Flags().StringVar(&mailbox, "mailbox", "INBOX", "mailbox to watch")
+	cmd.Flags().DurationVar(&pollInterval, "poll-interval", 30*time.Second, "poll interval when IDLE unavailable")
+	cmd.Flags().BoolVar(&useJSON, "json", false, "output as JSON Lines")
+
+	return cmd
 }

@@ -11,6 +11,14 @@ smtp:
   use_tls: false        # direct TLS (port 465)
   starttls: true        # STARTTLS upgrade (port 587)
 
+imap:
+  host: imap.example.com
+  port: 993
+  user: alerts@example.com
+  pass: ""              # or set HERMES_IMAP_PASS
+  use_tls: true         # direct TLS (port 993) — IMAP convention, unlike SMTP's STARTTLS-on-587
+  starttls: false       # mutually exclusive with use_tls
+
 dkim:
   selector: hermes
   domain: example.com
