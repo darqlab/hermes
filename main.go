@@ -582,6 +582,7 @@ func readCmd() *cobra.Command {
 		limit       uint
 		from        string
 		subject     string
+		body        string
 		unseenOnly  bool
 		useJSON     bool
 		headersOnly bool
@@ -595,11 +596,12 @@ func readCmd() *cobra.Command {
 messages, and print them. By default fetches the most recent 10 messages
 from INBOX.
 
-Filters (--from, --subject) are substring matches. When multiple filters
-are set they are combined with AND — all must match.
+Filters (--from, --subject, --body) are substring matches. When multiple filters
+are set they are combined with AND — all must match. --from and --subject
+search message headers; --body searches the message body text.
 
 --uid fetches exactly one message by IMAP UID (incompatible with --limit,
---from, --subject, --unseen-only). --headers-only drops body_text and
+--from, --subject, --body, --unseen-only). --headers-only drops body_text and
 body_html from JSON output (text mode is already body-free).
 
 Exit codes: 0 on success (including zero matching messages), 1 on
@@ -626,6 +628,7 @@ Output without --json is one line per message: date\tfrom\tsubject.`,
 		Example: `  hermes read
   hermes read --mailbox INBOX --limit 5 --unseen-only
   hermes read --from "alert@example.com" --subject "disk full"
+  hermes read --body "urgent" --limit 20
   hermes read --json --limit 20 --headers-only
   hermes read --uid 42 --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -665,6 +668,9 @@ Output without --json is one line per message: date\tfrom\tsubject.`,
 				}
 				if subject != "" {
 					criteria.Header = append(criteria.Header, imap.SearchCriteriaHeaderField{Key: "SUBJECT", Value: subject})
+				}
+				if body != "" {
+					criteria.Body = append(criteria.Body, body)
 				}
 
 				searchData, err := client.Search(criteria)
@@ -743,6 +749,7 @@ Output without --json is one line per message: date\tfrom\tsubject.`,
 	cmd.Flags().UintVar(&limit, "limit", 10, "max messages to return")
 	cmd.Flags().StringVar(&from, "from", "", "filter by From address (substring)")
 	cmd.Flags().StringVar(&subject, "subject", "", "filter by Subject (substring)")
+	cmd.Flags().StringVar(&body, "body", "", "filter by message body (substring)")
 	cmd.Flags().BoolVar(&unseenOnly, "unseen-only", false, "only unseen messages")
 	cmd.Flags().BoolVar(&useJSON, "json", false, "output as JSON array")
 	cmd.Flags().BoolVar(&headersOnly, "headers-only", false, "omit body_text/body_html from JSON output")
