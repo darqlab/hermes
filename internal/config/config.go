@@ -8,6 +8,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type IMAPConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Pass     string `yaml:"pass"`
+	UseTLS   bool   `yaml:"use_tls"`
+	StartTLS bool   `yaml:"starttls"`
+}
+
 type SMTPConfig struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
@@ -39,6 +48,7 @@ type LogConfig struct {
 type Config struct {
 	From  string      `yaml:"from"`
 	SMTP  SMTPConfig  `yaml:"smtp"`
+	IMAP  IMAPConfig  `yaml:"imap"`
 	DKIM  DKIMConfig  `yaml:"dkim"`
 	Queue QueueConfig `yaml:"queue"`
 	Log   LogConfig   `yaml:"log"`
@@ -50,6 +60,10 @@ func Defaults() *Config {
 			Port:     587,
 			UseTLS:   false,
 			StartTLS: true,
+		},
+		IMAP: IMAPConfig{
+			Port:   993,
+			UseTLS: true,
 		},
 		Queue: QueueConfig{
 			QueueFile:   "hermes_queue.json",
@@ -127,6 +141,24 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("HERMES_SMTP_STARTTLS"); v == "false" || v == "0" {
 		cfg.SMTP.StartTLS = false
+	}
+	if v := os.Getenv("HERMES_IMAP_HOST"); v != "" {
+		cfg.IMAP.Host = v
+	}
+	if v := os.Getenv("HERMES_IMAP_PORT"); v != "" {
+		fmt.Sscanf(v, "%d", &cfg.IMAP.Port)
+	}
+	if v := os.Getenv("HERMES_IMAP_USER"); v != "" {
+		cfg.IMAP.User = v
+	}
+	if v := os.Getenv("HERMES_IMAP_PASS"); v != "" {
+		cfg.IMAP.Pass = v
+	}
+	if v := os.Getenv("HERMES_IMAP_USE_TLS"); v == "true" || v == "1" {
+		cfg.IMAP.UseTLS = true
+	}
+	if v := os.Getenv("HERMES_IMAP_STARTTLS"); v == "false" || v == "0" {
+		cfg.IMAP.StartTLS = false
 	}
 	if v := os.Getenv("HERMES_DKIM_SELECTOR"); v != "" {
 		cfg.DKIM.Selector = v
