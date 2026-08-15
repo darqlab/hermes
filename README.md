@@ -8,7 +8,7 @@ hermes read --unseen-only --limit 5
 hermes watch --json
 ```
 
-**Current status:** v0.0.8 — send + read + watch all live.
+**Current status:** v0.1.0 — send + read + watch all live, with multi-account config.
 
 ## Install
 
