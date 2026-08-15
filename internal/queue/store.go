@@ -25,6 +25,7 @@ type Job struct {
 	RetryCount   int       `json:"retry_count"`
 	NextRetryAt  time.Time `json:"next_retry_at"`
 	Status       JobStatus `json:"status"`
+	Account      string    `json:"account,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	LastError    string    `json:"last_error,omitempty"`
 }

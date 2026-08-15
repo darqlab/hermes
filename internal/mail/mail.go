@@ -155,8 +155,7 @@ func deliverStartTLS(addr, host, user, pass string, useStartTLS bool, from strin
 
 func sendData(client *smtp.Client, host, user, pass, from string, to []string, raw []byte) (string, error) {
 	if pass != "" {
-		auth := smtp.PlainAuth("", user, pass, host)
-		if err := client.Auth(auth); err != nil {
+		if err := client.Auth(pickAuth(client, host, user, pass)); err != nil {
 			return "", fmt.Errorf("auth: %w", err)
 		}
 	}
