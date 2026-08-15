@@ -1,28 +1,70 @@
-# Hermes config — copy to hermes.yaml and fill in real values.
-# Each value can also be set via HERMES_ prefix env vars (e.g. HERMES_SMTP_HOST).
+# Hermes config — copy to hermes.yaml (or ~/hermes.yaml) and fill in real values.
+#
+# Two forms are supported:
+#
+#   1. The multi-account form below ("accounts:"), recommended — one named
+#      block per mail identity, selected with "hermes --account NAME ...",
+#      the HERMES_ACCOUNT env var, or "default_account".
+#
+#   2. The legacy flat form — top-level "from:", "smtp:", "imap:", "dkim:"
+#      with no "accounts:" map. Still fully supported and unchanged: it is
+#      treated as a single account named "default". See the bottom of this
+#      file for that layout.
+#
+# HERMES_* env vars override whichever account is resolved
+# (HERMES_FROM, HERMES_SMTP_*, HERMES_IMAP_*, HERMES_DKIM_*).
+# HERMES_QUEUE_* and HERMES_ACCOUNT are global.
 
-from: ""                 # default envelope/header From for "hermes send"; falls back to smtp.user if unset (or set HERMES_FROM)
+default_account: darqlab   # used when neither --account nor HERMES_ACCOUNT is set
 
-smtp:
-  host: smtp.example.com
-  port: 587
-  user: alerts@example.com
-  pass: ""              # or set HERMES_SMTP_PASS
-  use_tls: false        # direct TLS (port 465)
-  starttls: true        # STARTTLS upgrade (port 587)
+accounts:
 
-imap:
-  host: imap.example.com
-  port: 993
-  user: alerts@example.com
-  pass: ""              # or set HERMES_IMAP_PASS
-  use_tls: true         # direct TLS (port 993) — IMAP convention, unlike SMTP's STARTTLS-on-587
-  starttls: false       # mutually exclusive with use_tls
+  # Zoho Mail (direct TLS on 465 for SMTP, 993 for IMAP)
+  darqlab:
+    from: dennis@darqlab.net    # default envelope/header From; falls back to smtp.user
+    smtp:
+      host: smtppro.zoho.com
+      port: 465
+      user: dennis@darqlab.net
+      pass: ""                  # or set HERMES_SMTP_PASS
+      use_tls: true             # direct TLS (port 465)
+      starttls: false
+    imap:
+      host: imappro.zoho.com
+      port: 993
+      user: dennis@darqlab.net
+      pass: ""                  # or set HERMES_IMAP_PASS
+      use_tls: true             # direct TLS (port 993)
+      starttls: false
+    dkim:
+      selector: hermes
+      domain: darqlab.net
+      key_file: ""              # path to RSA private key PEM file
 
-dkim:
-  selector: hermes
-  domain: example.com
-  key_file: ""          # path to RSA private key PEM file
+  # Microsoft 365 / Office 365 (STARTTLS on 587).
+  # Note: Office 365 advertises "AUTH LOGIN XOAUTH2" and does NOT offer
+  # AUTH PLAIN — Hermes detects this from the EHLO response and uses
+  # AUTH LOGIN automatically. Use an app password if MFA is enabled.
+  work:
+    from: you@yourcompany.com
+    smtp:
+      host: smtp.office365.com
+      port: 587
+      user: you@yourcompany.com
+      pass: ""                  # or set HERMES_SMTP_PASS
+      use_tls: false
+      starttls: true            # STARTTLS upgrade (port 587)
+    imap:
+      host: outlook.office365.com
+      port: 993
+      user: you@yourcompany.com
+      pass: ""                  # or set HERMES_IMAP_PASS
+      use_tls: true
+      starttls: false
+
+# ---------------------------------------------------------------------------
+# Global settings (not per-account)
+# ---------------------------------------------------------------------------
 
 queue:
   queue_file: hermes_queue.json
@@ -34,3 +76,28 @@ queue:
 log:
   level: info           # debug, info, warn, error
   format: text          # text, json
+
+# ---------------------------------------------------------------------------
+# Legacy flat form (still accepted — do NOT combine with "accounts:" above;
+# if "accounts:" is present, these top-level blocks are ignored):
+#
+# from: alerts@example.com
+# smtp:
+#   host: smtp.example.com
+#   port: 587
+#   user: alerts@example.com
+#   pass: ""
+#   use_tls: false
+#   starttls: true
+# imap:
+#   host: imap.example.com
+#   port: 993
+#   user: alerts@example.com
+#   pass: ""
+#   use_tls: true
+#   starttls: false
+# dkim:
+#   selector: hermes
+#   domain: example.com
+#   key_file: ""
+# ---------------------------------------------------------------------------

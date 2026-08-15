@@ -25,8 +25,9 @@ import (
 var version = "dev"
 
 var (
-	cfgFile  string
-	logLevel string
+	cfgFile     string
+	logLevel    string
+	accountName string
 
 	rootCmd = &cobra.Command{
 		Use:   "hermes",
@@ -57,17 +58,51 @@ Configuration resolution order (later steps override earlier ones):
        HERMES_QUEUE_BACKOFF_BASE, HERMES_QUEUE_BACKOFF_CAP,
        HERMES_IMAP_HOST, HERMES_IMAP_PORT, HERMES_IMAP_USER, HERMES_IMAP_PASS,
        HERMES_IMAP_USE_TLS (true/1), HERMES_IMAP_STARTTLS (false/0 to
-       disable).
+       disable), HERMES_ACCOUNT (selects a named account — see below).
 
-Top-level "from" (config file) / HERMES_FROM (env) sets the default envelope-
-and-header From address used when "hermes send --from" is omitted. If unset,
-it falls back to smtp.user.
+Accounts: the config may declare several named accounts, each with its own
+from/smtp/imap/dkim block, under a top-level "accounts:" map:
 
-smtp.host, smtp.user, and smtp.pass are always required (from file or env)
-except for "hermes send --dry-run", which composes a message and prints it
-without touching config or the network at all. imap.host, imap.user, and
-imap.pass are required only for "hermes read" and "hermes watch" — send
-works without any imap.* config present.
+  default_account: work
+  accounts:
+    work:
+      from: me@work.example
+      smtp: {host: smtp.office365.com, port: 587, user: me@work.example, pass: ...}
+      imap: {host: outlook.office365.com, port: 993, user: me@work.example, pass: ...}
+    personal:
+      from: me@personal.example
+      smtp: {host: smtppro.zoho.com, port: 465, user: me@personal.example, pass: ...}
+
+Every command accepts --account/-a NAME to pick one. Account selection order:
+  1. --account/-a NAME
+  2. HERMES_ACCOUNT env var
+  3. "default_account" in the config file
+  4. the only declared account, when exactly one exists
+Otherwise the command fails and lists the available account names. For
+"hermes send", an explicit --from that matches an account's "from" address
+selects that account automatically (case-insensitive), unless --account was
+given. Queued messages remember the account they were composed for.
+
+The flat legacy form (top-level "from:", "smtp:", "imap:", "dkim:" with no
+"accounts:" map) is still fully supported and behaves exactly as before: it
+is treated as a single account named "default". Per-account defaults when
+using "accounts:": smtp.port=587, imap.port=993, TLS chosen from the port
+(smtp use_tls on 465, starttls otherwise; imap use_tls).
+
+"from" (per account, or top-level in the legacy form) / HERMES_FROM (env)
+sets the default envelope-and-header From address used when "hermes send
+--from" is omitted. If unset, it falls back to smtp.user.
+
+smtp.host, smtp.user, and smtp.pass are required on the account actually
+used (from file or env), except for "hermes send --dry-run", which composes
+a message and prints it without touching config or the network at all.
+imap.host, imap.user, and imap.pass are required only for "hermes read" and
+"hermes watch" — send works without any imap.* config present. Validation is
+per-account and lazy: a misconfigured second account never blocks the first.
+
+HERMES_FROM / HERMES_SMTP_* / HERMES_IMAP_* / HERMES_DKIM_* env vars are
+applied to whichever account was resolved. HERMES_QUEUE_* and HERMES_ACCOUNT
+are global.
 
 Exit codes: 0 on success. Non-zero (1) on any failure — config/validation
 errors, compose errors, delivery failures (including when the message was
@@ -89,6 +124,7 @@ the JSON "status" field or JSON array to distinguish failure reasons.`,
 func main() {
 	rootCmd.Version = version
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ./hermes.yaml)")
+	rootCmd.PersistentFlags().StringVarP(&accountName, "account", "a", "", "named account from the config's accounts: map (default: default_account, or the only account)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")
 
 	rootCmd.AddCommand(sendCmd())
@@ -102,32 +138,39 @@ func main() {
 }
 
 func loadConfig() (*config.Config, error) {
-	cfg, err := config.Load(cfgFile)
+	return config.Load(cfgFile)
+}
+
+// loadAccount loads the config and resolves the account selected by
+// --account / HERMES_ACCOUNT / default_account.
+func loadAccount() (*config.Config, *config.Account, error) {
+	cfg, err := loadConfig()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := cfg.Validate(); err != nil {
-		return nil, err
+	acct, err := cfg.Resolve(accountName)
+	if err != nil {
+		return nil, nil, err
 	}
-	return cfg, nil
+	return cfg, acct, nil
 }
 
 func sendCmd() *cobra.Command {
 	var (
-		to        []string
-		from      string
-		cc        []string
-		bcc       []string
-		replyTo   string
-		subject   string
-		body      string
-		bodyHTML  string
-		attach    []string
-		useJSON   bool
-		noQueue   bool
-		dryRun    bool
-		noSign    bool
-		quiet     bool
+		to       []string
+		from     string
+		cc       []string
+		bcc      []string
+		replyTo  string
+		subject  string
+		body     string
+		bodyHTML string
+		attach   []string
+		useJSON  bool
+		noQueue  bool
+		dryRun   bool
+		noSign   bool
+		quiet    bool
 	)
 
 	cmd := &cobra.Command{
@@ -142,10 +185,23 @@ message.
 
 Recipients: --to is required (repeatable for multiple recipients). --cc and
 --bcc are optional and repeatable. --from is optional; if omitted it
-defaults to the resolved config's top-level "from" (or HERMES_FROM env var),
-falling back to "smtp.user" if neither is set (see "hermes --help" for
-config resolution order). --dry-run does not load config, so with --from
+defaults to the resolved account's "from" (or HERMES_FROM env var), falling
+back to that account's "smtp.user" if neither is set (see "hermes --help"
+for config resolution order). --dry-run does not load config, so with --from
 omitted it prints a "hermes@localhost" placeholder From address instead.
+
+Account selection (config keys / flags):
+  --account, -a NAME  send through the named account under "accounts:"
+  HERMES_ACCOUNT      same, via env
+  default_account     config key naming the account used when neither is set
+  accounts.<name>.from / .smtp.* / .dkim.*  the per-account settings used
+When --account is not given but --from is, and --from matches an account's
+"from" address, that account is used automatically. With the legacy flat
+config (no "accounts:" map), the top-level from/smtp/dkim are used as the
+single "default" account, exactly as before. The composed message is
+DKIM-signed with the selected account's dkim.* settings, delivered via its
+smtp.*, and — on failure — queued with that account recorded, so the retry
+goes out through the same server.
 
 On delivery failure: the composed message is automatically enqueued to the
 local retry queue (see "hermes queue --help") unless --no-queue is set, in
@@ -184,7 +240,10 @@ main.go):
   hermes send --to you@example.com --subject "Hi" --body "Hello" --dry-run
 
   # Body piped via stdin
-  echo "Hello from a script" | hermes send --to you@example.com --subject "Hi"`,
+  echo "Hello from a script" | hermes send --to you@example.com --subject "Hi"
+
+  # Send through a named account from the config's accounts: map
+  hermes send --account work --to you@example.com --subject "Hi" --body "Hello"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(to) == 0 {
 				return fmt.Errorf("--to is required")
@@ -203,7 +262,10 @@ main.go):
 				return fmt.Errorf("body is required (--body, --body-html, or stdin)")
 			}
 
-			var cfg *config.Config
+			var (
+				cfg  *config.Config
+				acct *config.Account
+			)
 			if dryRun {
 				if from == "" {
 					from = "hermes@localhost"
@@ -214,11 +276,28 @@ main.go):
 				if err != nil {
 					return fmt.Errorf("config: %w", err)
 				}
+
+				// Account selection: an explicit --account wins; otherwise a
+				// --from address that matches an account's "from" routes to
+				// that account; otherwise fall back to the normal
+				// HERMES_ACCOUNT / default_account resolution.
+				if accountName == "" && from != "" {
+					if matched, ok := cfg.AccountForFrom(from); ok {
+						acct = matched
+					}
+				}
+				if acct == nil {
+					acct, err = cfg.Resolve(accountName)
+					if err != nil {
+						return fmt.Errorf("config: %w", err)
+					}
+				}
+
 				if from == "" {
-					if cfg.From != "" {
-						from = cfg.From
+					if acct.From != "" {
+						from = acct.From
 					} else {
-						from = cfg.SMTP.User
+						from = acct.SMTP.User
 					}
 				}
 			}
@@ -244,24 +323,24 @@ main.go):
 				return nil
 			}
 
-			if cfg.DKIM.KeyFile != "" && !noSign {
-				log.Printf("dkim signing (domain=%s, selector=%s)", cfg.DKIM.Domain, cfg.DKIM.Selector)
-				raw, err = mail.Sign(raw, cfg.DKIM.Domain, cfg.DKIM.Selector, cfg.DKIM.KeyFile)
+			if acct.DKIM.KeyFile != "" && !noSign {
+				log.Printf("dkim signing (domain=%s, selector=%s)", acct.DKIM.Domain, acct.DKIM.Selector)
+				raw, err = mail.Sign(raw, acct.DKIM.Domain, acct.DKIM.Selector, acct.DKIM.KeyFile)
 				if err != nil {
 					return fmt.Errorf("dkim: %w", err)
 				}
 			}
 
 			smtpCfg := mail.SMTPDeliverConfig{
-				Host:     cfg.SMTP.Host,
-				Port:     cfg.SMTP.Port,
-				User:     cfg.SMTP.User,
-				Pass:     cfg.SMTP.Pass,
-				UseTLS:   cfg.SMTP.UseTLS,
-				StartTLS: cfg.SMTP.StartTLS,
+				Host:     acct.SMTP.Host,
+				Port:     acct.SMTP.Port,
+				User:     acct.SMTP.User,
+				Pass:     acct.SMTP.Pass,
+				UseTLS:   acct.SMTP.UseTLS,
+				StartTLS: acct.SMTP.StartTLS,
 			}
 
-			log.Printf("delivering via %s:%d", cfg.SMTP.Host, cfg.SMTP.Port)
+			log.Printf("delivering via %s:%d (account %q)", acct.SMTP.Host, acct.SMTP.Port, acct.Name)
 			resp, err := mail.Deliver(from, append(append(to, cc...), bcc...), raw, smtpCfg)
 			if err != nil {
 				log.Printf("delivery failed: %v", err)
@@ -288,6 +367,7 @@ main.go):
 					EnvelopeTo:   append(append(to, cc...), bcc...),
 					RawMIME:      raw,
 					Status:       queue.StatusPending,
+					Account:      acct.Name,
 					CreatedAt:    time.Now(),
 				}
 				if err := store.Enqueue(job); err != nil {
@@ -563,19 +643,6 @@ func jsonString(v any) string {
 	return buf.String()
 }
 
-func validateIMAPConfig(cfg *config.Config) error {
-	if cfg.IMAP.Host == "" {
-		return fmt.Errorf("imap.host is required for read/watch (set in config or HERMES_IMAP_HOST)")
-	}
-	if cfg.IMAP.User == "" {
-		return fmt.Errorf("imap.user is required for read/watch (set in config or HERMES_IMAP_USER)")
-	}
-	if cfg.IMAP.Pass == "" {
-		return fmt.Errorf("imap.pass is required for read/watch (set in config or HERMES_IMAP_PASS)")
-	}
-	return nil
-}
-
 func readCmd() *cobra.Command {
 	var (
 		mailbox     string
@@ -649,32 +716,41 @@ JSON output shape (exact, as emitted):
     Zero matches: [] (empty array, exit 0)
   Failure (stderr, exit 1): unstructured Go error message
 
-Config: uses imap.host, imap.port, imap.user, imap.pass from config
-file or HERMES_IMAP_* env vars. Defaults: port=993, use_tls=true.
-Send-only users do not need any imap.* config.`,
+Config: uses imap.host, imap.port, imap.user, imap.pass from the resolved
+account, or HERMES_IMAP_* env vars. Defaults: port=993, use_tls=true.
+Send-only users do not need any imap.* config.
+
+Account selection:
+  --account, -a NAME  read the named account under "accounts:"
+  HERMES_ACCOUNT      same, via env
+  default_account     config key naming the account used when neither is set
+  accounts.<name>.imap.host / .port / .user / .pass  the settings used
+With the legacy flat config (no "accounts:" map), the top-level imap.* block
+is used, exactly as before.`,
 		Example: `  hermes read
   hermes read --mailbox INBOX --limit 5 --unseen-only
   hermes read --from "alert@example.com" --subject "disk full"
   hermes read --body "urgent" --limit 20
   hermes read --since 2026-08-01 --before 2026-08-05
   hermes read --json --limit 20 --headers-only
-  hermes read --uid 42 --json`,
+  hermes read --uid 42 --json
+  hermes read --account work --unseen-only`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			_, acct, err := loadAccount()
 			if err != nil {
 				return err
 			}
-			if err := validateIMAPConfig(cfg); err != nil {
+			if err := acct.ValidateIMAP(); err != nil {
 				return err
 			}
 
-			client, err := read.DialTLS(cfg.IMAP.Host, cfg.IMAP.Port)
+			client, err := read.DialTLS(acct.IMAP.Host, acct.IMAP.Port)
 			if err != nil {
 				return fmt.Errorf("imap connect: %w", err)
 			}
 			defer client.Close()
 
-			if err := client.Login(cfg.IMAP.User, cfg.IMAP.Pass); err != nil {
+			if err := client.Login(acct.IMAP.User, acct.IMAP.Pass); err != nil {
 				return fmt.Errorf("imap auth: %w", err)
 			}
 
@@ -843,25 +919,34 @@ Configuration (IMAP):
   imap.pass / HERMES_IMAP_PASS        — required
   imap.use_tls / HERMES_IMAP_USE_TLS  — default true (true/1 to enable)
   imap.starttls / HERMES_IMAP_STARTTLS — default false (false/0 to disable)
-  Only required for read/watch — send works without any imap.* config present.`,
+  Only required for read/watch — send works without any imap.* config present.
+
+Account selection:
+  --account, -a NAME  watch the named account under "accounts:"
+  HERMES_ACCOUNT      same, via env
+  default_account     config key naming the account used when neither is set
+  accounts.<name>.imap.*  the per-account IMAP settings (same keys as above)
+With the legacy flat config (no "accounts:" map), the top-level imap.* block
+is used, exactly as before.`,
 		Example: `  hermes watch
   hermes watch --mailbox INBOX --json
   hermes watch --poll-interval 10s
-  hermes watch --no-idle --poll-interval 5s`,
+  hermes watch --no-idle --poll-interval 5s
+  hermes watch --account personal --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			_, acct, err := loadAccount()
 			if err != nil {
 				return err
 			}
-			if err := validateIMAPConfig(cfg); err != nil {
+			if err := acct.ValidateIMAP(); err != nil {
 				return err
 			}
 
 			return read.Watch(context.Background(), read.WatchConfig{
-				Host:         cfg.IMAP.Host,
-				Port:         cfg.IMAP.Port,
-				User:         cfg.IMAP.User,
-				Pass:         cfg.IMAP.Pass,
+				Host:         acct.IMAP.Host,
+				Port:         acct.IMAP.Port,
+				User:         acct.IMAP.User,
+				Pass:         acct.IMAP.Pass,
 				Mailbox:      mailbox,
 				PollInterval: pollInterval,
 				NoIDLE:       noIDLE,

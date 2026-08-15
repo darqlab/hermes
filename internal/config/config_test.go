@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,6 +46,7 @@ func TestDefaults(t *testing.T) {
 func clearHermesEnv(t *testing.T) {
 	t.Helper()
 	vars := []string{
+		"HERMES_ACCOUNT",
 		"HERMES_FROM",
 		"HERMES_SMTP_HOST",
 		"HERMES_SMTP_PORT",
@@ -166,14 +168,19 @@ func TestLoad_MissingFileCompleteEnvVars(t *testing.T) {
 func TestLoad_MissingFileIncompleteEnvVars(t *testing.T) {
 	clearHermesEnv(t)
 	t.Setenv("HERMES_SMTP_HOST", "smtp.env.example.com")
-	// user/pass intentionally not set -> Validate() should fail
+	// user/pass intentionally not set. SMTP credential checks moved from
+	// Config.Validate to Account.Validate (so a broken second account can't
+	// break the first), so Load now succeeds and Resolve is what fails.
 
 	dir := t.TempDir()
 	missingPath := filepath.Join(dir, "does-not-exist.yaml")
 
-	_, err := Load(missingPath)
-	if err == nil {
-		t.Fatal("Load() error = nil, want error for incomplete env vars")
+	cfg, err := Load(missingPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil (SMTP validation is now per-account)", err)
+	}
+	if _, err := cfg.Resolve(""); err == nil {
+		t.Fatal("Resolve() error = nil, want error for incomplete env vars")
 	}
 }
 
@@ -323,18 +330,18 @@ func TestValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "missing smtp.host",
+			// SMTP credentials are validated per-account by Account.Validate
+			// (see TestAccountValidate), no longer by Config.Validate.
+			name:    "missing smtp.host is not a global validation error",
 			mutate:  func(c *Config) { c.SMTP.Host = "" },
-			wantErr: true,
+			wantErr: false,
 		},
 		{
-			name:    "missing smtp.user",
-			mutate:  func(c *Config) { c.SMTP.User = "" },
-			wantErr: true,
-		},
-		{
-			name:    "missing smtp.pass",
-			mutate:  func(c *Config) { c.SMTP.Pass = "" },
+			name: "default_account naming an undefined account",
+			mutate: func(c *Config) {
+				c.DefaultAccount = "nope"
+				c.Accounts = map[string]Account{"work": {}}
+			},
 			wantErr: true,
 		},
 		{
@@ -478,5 +485,382 @@ smtp:
 	}
 	if cfg.IMAP.Port != 993 {
 		t.Errorf("IMAP.Port = %d, want 993 (default should still apply)", cfg.IMAP.Port)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Multi-account tests
+// ---------------------------------------------------------------------------
+
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	return path
+}
+
+// BACKWARD COMPATIBILITY: a flat config with no accounts: key and no
+// --account flag must behave exactly as it did before multi-account support.
+func TestResolve_LegacyFlatConfigSynthesizesDefaultAccount(t *testing.T) {
+	clearHermesEnv(t)
+
+	path := writeConfig(t, `
+from: forge@example.com
+smtp:
+  host: smtp.example.com
+  port: 465
+  user: alice
+  pass: secret
+  use_tls: true
+  starttls: false
+imap:
+  host: imap.example.com
+  port: 993
+  user: alice
+  pass: imapsecret
+  use_tls: true
+dkim:
+  selector: mail
+  domain: example.com
+  key_file: /keys/dkim.pem
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	acct, err := cfg.Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve(\"\") error = %v", err)
+	}
+
+	if acct.Name != "default" {
+		t.Errorf("Name = %q, want default", acct.Name)
+	}
+	if acct.From != "forge@example.com" {
+		t.Errorf("From = %q, want forge@example.com", acct.From)
+	}
+	if acct.SMTP.Host != "smtp.example.com" || acct.SMTP.Port != 465 ||
+		acct.SMTP.User != "alice" || acct.SMTP.Pass != "secret" ||
+		!acct.SMTP.UseTLS || acct.SMTP.StartTLS {
+		t.Errorf("SMTP = %+v, want the legacy top-level smtp block verbatim", acct.SMTP)
+	}
+	if acct.IMAP.Host != "imap.example.com" || acct.IMAP.User != "alice" || acct.IMAP.Pass != "imapsecret" {
+		t.Errorf("IMAP = %+v, want the legacy top-level imap block verbatim", acct.IMAP)
+	}
+	if acct.DKIM.Selector != "mail" || acct.DKIM.Domain != "example.com" || acct.DKIM.KeyFile != "/keys/dkim.pem" {
+		t.Errorf("DKIM = %+v, want the legacy top-level dkim block verbatim", acct.DKIM)
+	}
+}
+
+// BACKWARD COMPATIBILITY: defaults still apply to a legacy config that only
+// sets the required fields.
+func TestResolve_LegacyFlatConfigKeepsDefaults(t *testing.T) {
+	clearHermesEnv(t)
+
+	path := writeConfig(t, `
+smtp:
+  host: smtp.example.com
+  user: alice
+  pass: secret
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	acct, err := cfg.Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve(\"\") error = %v", err)
+	}
+	if acct.SMTP.Port != 587 || acct.SMTP.StartTLS != true || acct.SMTP.UseTLS != false {
+		t.Errorf("SMTP = %+v, want defaults port=587 starttls=true use_tls=false", acct.SMTP)
+	}
+	if acct.IMAP.Port != 993 || !acct.IMAP.UseTLS {
+		t.Errorf("IMAP = %+v, want defaults port=993 use_tls=true", acct.IMAP)
+	}
+}
+
+// BACKWARD COMPATIBILITY: env-only operation (no config file) still works.
+func TestResolve_EnvOnlyNoConfigFile(t *testing.T) {
+	clearHermesEnv(t)
+	t.Setenv("HERMES_SMTP_HOST", "smtp.env.example.com")
+	t.Setenv("HERMES_SMTP_USER", "envuser")
+	t.Setenv("HERMES_SMTP_PASS", "envpass")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	acct, err := cfg.Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve(\"\") error = %v", err)
+	}
+	if acct.SMTP.Host != "smtp.env.example.com" || acct.SMTP.User != "envuser" || acct.SMTP.Pass != "envpass" {
+		t.Errorf("SMTP = %+v, want env-derived values", acct.SMTP)
+	}
+}
+
+const multiAccountYAML = `
+default_account: work
+accounts:
+  work:
+    from: me@work.example
+    smtp:
+      host: smtp.office365.com
+      user: me@work.example
+      pass: workpass
+    imap:
+      host: outlook.office365.com
+      user: me@work.example
+      pass: workimap
+  personal:
+    from: Me <me@personal.example>
+    smtp:
+      host: smtppro.zoho.com
+      port: 465
+      user: me@personal.example
+      pass: personalpass
+  broken:
+    from: broken@example.com
+`
+
+func loadMulti(t *testing.T) *Config {
+	t.Helper()
+	cfg, err := Load(writeConfig(t, multiAccountYAML))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	return cfg
+}
+
+func TestResolve_ExplicitNameWins(t *testing.T) {
+	clearHermesEnv(t)
+	t.Setenv("HERMES_ACCOUNT", "work")
+	cfg := loadMulti(t)
+
+	acct, err := cfg.Resolve("personal")
+	if err != nil {
+		t.Fatalf("Resolve(\"personal\") error = %v", err)
+	}
+	if acct.Name != "personal" || acct.SMTP.Host != "smtppro.zoho.com" {
+		t.Errorf("got %+v, want the personal account (--account beats HERMES_ACCOUNT)", acct)
+	}
+}
+
+func TestResolve_EnvBeatsDefaultAccount(t *testing.T) {
+	clearHermesEnv(t)
+	t.Setenv("HERMES_ACCOUNT", "personal")
+	cfg := loadMulti(t)
+
+	acct, err := cfg.Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve(\"\") error = %v", err)
+	}
+	if acct.Name != "personal" {
+		t.Errorf("Name = %q, want personal (HERMES_ACCOUNT beats default_account)", acct.Name)
+	}
+}
+
+func TestResolve_FallsBackToDefaultAccount(t *testing.T) {
+	clearHermesEnv(t)
+	cfg := loadMulti(t)
+
+	acct, err := cfg.Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve(\"\") error = %v", err)
+	}
+	if acct.Name != "work" {
+		t.Errorf("Name = %q, want work (default_account)", acct.Name)
+	}
+}
+
+func TestResolve_SingleAccountNeedsNoSelection(t *testing.T) {
+	clearHermesEnv(t)
+	cfg, err := Load(writeConfig(t, `
+accounts:
+  only:
+    from: only@example.com
+    smtp: {host: smtp.example.com, user: u, pass: p}
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	acct, err := cfg.Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve(\"\") error = %v", err)
+	}
+	if acct.Name != "only" {
+		t.Errorf("Name = %q, want only", acct.Name)
+	}
+}
+
+func TestResolve_AmbiguousListsAccountsSorted(t *testing.T) {
+	clearHermesEnv(t)
+	cfg, err := Load(writeConfig(t, `
+accounts:
+  work:
+    smtp: {host: h, user: u, pass: p}
+  personal:
+    smtp: {host: h, user: u, pass: p}
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	_, err = cfg.Resolve("")
+	if err == nil {
+		t.Fatal("Resolve(\"\") error = nil, want error when no account is selected")
+	}
+	if !strings.Contains(err.Error(), "personal, work") {
+		t.Errorf("error = %q, want it to list available accounts sorted (\"personal, work\")", err)
+	}
+}
+
+func TestResolve_UnknownNameListsAccounts(t *testing.T) {
+	clearHermesEnv(t)
+	cfg := loadMulti(t)
+
+	_, err := cfg.Resolve("nosuch")
+	if err == nil {
+		t.Fatal("Resolve(\"nosuch\") error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "nosuch") ||
+		!strings.Contains(err.Error(), "broken, personal, work") {
+		t.Errorf("error = %q, want it to name the missing account and list available ones sorted", err)
+	}
+}
+
+func TestResolve_AppliesPerAccountDefaults(t *testing.T) {
+	clearHermesEnv(t)
+	cfg := loadMulti(t)
+
+	work, err := cfg.Resolve("work")
+	if err != nil {
+		t.Fatalf("Resolve(\"work\") error = %v", err)
+	}
+	if work.SMTP.Port != 587 || !work.SMTP.StartTLS || work.SMTP.UseTLS {
+		t.Errorf("work SMTP = %+v, want port 587 with STARTTLS", work.SMTP)
+	}
+	if work.IMAP.Port != 993 || !work.IMAP.UseTLS {
+		t.Errorf("work IMAP = %+v, want port 993 with direct TLS", work.IMAP)
+	}
+
+	personal, err := cfg.Resolve("personal")
+	if err != nil {
+		t.Fatalf("Resolve(\"personal\") error = %v", err)
+	}
+	if personal.SMTP.Port != 465 || !personal.SMTP.UseTLS || personal.SMTP.StartTLS {
+		t.Errorf("personal SMTP = %+v, want port 465 with direct TLS", personal.SMTP)
+	}
+}
+
+func TestResolve_AppliesEnvOverridesToResolvedAccount(t *testing.T) {
+	clearHermesEnv(t)
+	t.Setenv("HERMES_SMTP_PASS", "fromenv")
+	t.Setenv("HERMES_FROM", "override@example.com")
+	cfg := loadMulti(t)
+
+	acct, err := cfg.Resolve("personal")
+	if err != nil {
+		t.Fatalf("Resolve(\"personal\") error = %v", err)
+	}
+	if acct.SMTP.Pass != "fromenv" {
+		t.Errorf("SMTP.Pass = %q, want env override fromenv", acct.SMTP.Pass)
+	}
+	if acct.From != "override@example.com" {
+		t.Errorf("From = %q, want env override", acct.From)
+	}
+	if acct.SMTP.Host != "smtppro.zoho.com" {
+		t.Errorf("SMTP.Host = %q, want the account's own value (not overridden)", acct.SMTP.Host)
+	}
+}
+
+// A broken account must not stop a good one from resolving.
+func TestResolve_BrokenAccountDoesNotAffectOthers(t *testing.T) {
+	clearHermesEnv(t)
+	cfg := loadMulti(t)
+
+	if _, err := cfg.Resolve("work"); err != nil {
+		t.Fatalf("Resolve(\"work\") error = %v, want nil despite a broken sibling account", err)
+	}
+	_, err := cfg.Resolve("broken")
+	if err == nil {
+		t.Fatal("Resolve(\"broken\") error = nil, want a validation error naming the account")
+	}
+	if !strings.Contains(err.Error(), "broken") || !strings.Contains(err.Error(), "smtp.host") {
+		t.Errorf("error = %q, want it to name the account and the missing field", err)
+	}
+}
+
+func TestAccountValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		acct    Account
+		wantErr bool
+	}{
+		{"complete", Account{Name: "a", SMTP: SMTPConfig{Host: "h", User: "u", Pass: "p"}}, false},
+		{"no host", Account{Name: "a", SMTP: SMTPConfig{User: "u", Pass: "p"}}, true},
+		{"no user", Account{Name: "a", SMTP: SMTPConfig{Host: "h", Pass: "p"}}, true},
+		{"no pass", Account{Name: "a", SMTP: SMTPConfig{Host: "h", User: "u"}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.acct.Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAccountValidateIMAP(t *testing.T) {
+	complete := Account{Name: "a", IMAP: IMAPConfig{Host: "h", User: "u", Pass: "p"}}
+	if err := complete.ValidateIMAP(); err != nil {
+		t.Errorf("ValidateIMAP() error = %v, want nil", err)
+	}
+	empty := Account{Name: "a"}
+	if err := empty.ValidateIMAP(); err == nil {
+		t.Error("ValidateIMAP() error = nil, want error for missing imap.host")
+	}
+}
+
+func TestAccountForFrom(t *testing.T) {
+	clearHermesEnv(t)
+	cfg := loadMulti(t)
+
+	acct, ok := cfg.AccountForFrom("ME@WORK.EXAMPLE")
+	if !ok {
+		t.Fatal("AccountForFrom() ok = false, want a case-insensitive match")
+	}
+	if acct.Name != "work" {
+		t.Errorf("Name = %q, want work", acct.Name)
+	}
+
+	if _, ok := cfg.AccountForFrom("nobody@example.com"); ok {
+		t.Error("AccountForFrom(unknown) ok = true, want false")
+	}
+	if _, ok := cfg.AccountForFrom(""); ok {
+		t.Error("AccountForFrom(\"\") ok = true, want false")
+	}
+
+	// The display-name form "Me <me@personal.example>" is stored verbatim,
+	// so matching is against the whole configured string.
+	if _, ok := cfg.AccountForFrom("Me <me@personal.example>"); !ok {
+		t.Error("AccountForFrom(display-name form) ok = false, want true")
+	}
+}
+
+func TestAccountForFrom_LegacyFlatConfig(t *testing.T) {
+	clearHermesEnv(t)
+	cfg, err := Load(writeConfig(t, `
+from: forge@example.com
+smtp: {host: h, user: u, pass: p}
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	acct, ok := cfg.AccountForFrom("Forge@Example.com")
+	if !ok || acct.Name != "default" {
+		t.Errorf("AccountForFrom() = %v, %v; want the synthesized default account", acct, ok)
 	}
 }

@@ -117,6 +117,7 @@ log:
 ### Env var overrides
 
 ```
+HERMES_ACCOUNT=work                # selects a named account (see "Multiple accounts")
 HERMES_FROM=forge@example.com
 HERMES_SMTP_HOST=smtp.example.com  HERMES_SMTP_PORT=587
 HERMES_SMTP_USER=alerts@x.com      HERMES_SMTP_PASS=secret
@@ -131,6 +132,101 @@ HERMES_IMAP_USE_TLS=true           HERMES_IMAP_STARTTLS=false
 ```
 
 Env vars override config file values. imap.* fields are only required for `read`/`watch` — `send` works without any imap config present.
+
+## Multiple accounts
+
+Hermes can hold several mail identities in one config. Declare them under a
+top-level `accounts:` map, each with its own `from`/`smtp`/`imap`/`dkim` block:
+
+```yaml
+# hermes.yaml
+default_account: darqlab
+
+accounts:
+  darqlab:                        # Zoho — direct TLS on 465
+    from: dennis@darqlab.net
+    smtp: {host: smtppro.zoho.com, port: 465, user: dennis@darqlab.net, pass: "", use_tls: true}
+    imap: {host: imappro.zoho.com, port: 993, user: dennis@darqlab.net, pass: "", use_tls: true}
+    dkim: {selector: hermes, domain: darqlab.net, key_file: dkim.key}
+
+  work:                           # Office 365 — STARTTLS on 587
+    from: you@yourcompany.com
+    smtp: {host: smtp.office365.com, port: 587, user: you@yourcompany.com, pass: "", starttls: true}
+    imap: {host: outlook.office365.com, port: 993, user: you@yourcompany.com, pass: "", use_tls: true}
+
+queue: {queue_file: hermes_queue.json, retry_max: 10}
+```
+
+`queue:` and `log:` stay global — only `from`/`smtp`/`imap`/`dkim` are per-account.
+
+### Selecting an account
+
+Every command takes `--account` / `-a`:
+
+```bash
+hermes send -a work --to boss@yourcompany.com --subject "Status" --body "..."
+hermes read -a work --unseen-only
+hermes watch -a darqlab --json
+```
+
+Selection order (first match wins):
+
+1. `--account NAME` / `-a NAME`
+2. `HERMES_ACCOUNT=NAME` env var
+3. `default_account:` in the config file
+4. the only declared account, when exactly one exists
+
+If none applies and more than one account is declared, the command fails and
+lists the available account names.
+
+For `hermes send`, an explicit `--from` that matches an account's `from`
+address (case-insensitive) selects that account automatically — so
+`hermes send --from you@yourcompany.com ...` goes out through `work` without
+naming it:
+
+```bash
+hermes send --from you@yourcompany.com --to boss@yourcompany.com --subject "Hi" --body "..."
+```
+
+`--account` always wins over `--from` matching.
+
+### What the account controls
+
+The selected account supplies the SMTP server used for delivery, the DKIM key
+used for signing, the IMAP server used by `read`/`watch`, and the default
+`From` address. A message that fails delivery is queued **with its account
+recorded**, so the retry goes out through the same server. Queue entries
+written by older Hermes versions have no account field; they deliver through
+the default account.
+
+### Env vars and multiple accounts
+
+`HERMES_FROM`, `HERMES_SMTP_*`, `HERMES_IMAP_*` and `HERMES_DKIM_*` are applied
+to *whichever account was resolved* — handy for keeping passwords out of the
+file for the one account a given script uses:
+
+```bash
+HERMES_ACCOUNT=work HERMES_SMTP_PASS="$WORK_APP_PASSWORD" \
+  hermes send --to boss@yourcompany.com --subject "Nightly" --body "ok"
+```
+
+`HERMES_QUEUE_*` and `HERMES_ACCOUNT` itself are global.
+
+### Backward compatibility
+
+The flat config (top-level `from:`/`smtp:`/`imap:`/`dkim:` with no `accounts:`
+map) is still fully supported and behaves exactly as before — it is treated as
+a single account named `default`, and `--account` is not needed.
+
+Validation is per-account and lazy: a misconfigured second account never stops
+the first one from working.
+
+### SMTP AUTH mechanisms
+
+Hermes picks its auth mechanism from the server's EHLO response: `AUTH PLAIN`
+when offered, otherwise `AUTH LOGIN`. This matters for Office 365
+(`smtp.office365.com:587`), which advertises `AUTH LOGIN XOAUTH2` and does not
+offer PLAIN at all. Credentials are never sent over an unencrypted connection.
 
 ## Commands
 
@@ -164,6 +260,9 @@ hermes send --to team@x.com --subject "Report" \
 # JSON output (machine-readable)
 hermes send --json --to user@x.com --subject "Test" --body "ok"
 # → {"status":"ok","server":"2.0.0 OK: queued as ..."}
+
+# Send through a named account (see "Multiple accounts")
+hermes send --account work --to boss@yourcompany.com --subject "Status" --body "..."
 
 # Quiet success output (LLM-friendly, minimal tokens)
 hermes send --json --quiet --to user@x.com --subject "Test" --body "ok"
